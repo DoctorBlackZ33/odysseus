@@ -33,8 +33,8 @@ The full license texts are kept in [`licenses/`](licenses/).
 - **[Tongyi DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)** by
   **Alibaba-NLP / Tongyi Lab** — the multi-step deep-research agent pipeline.
   Copyright © Alibaba-NLP / Tongyi Lab. **Apache-2.0.** Adapted for Odysseus's
-  Deep Research feature (`api/research_*.py`, `routes/research_routes.py`,
-  `services/search/`). Full text in
+  Deep Research feature (`services/research/`, `src/research_handler.py`,
+  `routes/research_routes.py`, `services/search/`). Full text in
   [`licenses/DeepResearch-Apache-2.0.txt`](licenses/DeepResearch-Apache-2.0.txt).
 
 ---
@@ -47,7 +47,7 @@ just composed.
 
 | Service | Image | Purpose | License |
 |---|---|---|---|
-| [SearXNG](https://github.com/searxng/searxng) | `searxng/searxng:latest` | Default metasearch backend | AGPL-3.0 |
+| [SearXNG](https://github.com/searxng/searxng) | `searxng/searxng:2026.5.31-7159b8aed` (pinned tag; see compose) | Default metasearch backend | AGPL-3.0 |
 | [ChromaDB](https://github.com/chroma-core/chroma) | `chromadb/chroma:latest` | Vector store for memory / RAG | Apache-2.0 |
 | [ntfy](https://github.com/binwiederhier/ntfy) | `binwiederhier/ntfy` | Push notifications (self-hosted reminders) | Apache-2.0 / GPL-2.0 |
 
@@ -65,6 +65,16 @@ Vendored in `static/lib/` and served directly:
 | [jsPDF](https://github.com/parallax/jsPDF) (bundled in html2pdf) | PDF generation | MIT |
 | [html2canvas](https://github.com/niklasvh/html2canvas) (bundled in html2pdf) | DOM → canvas rasterization | MIT |
 | [node-qrcode](https://github.com/soldair/node-qrcode) (`qrcode.min.js`) | QR-code rendering (2FA setup) | MIT |
+| [KaTeX](https://github.com/KaTeX/KaTeX) v0.16.22 (`katex/katex.min.{js,css}` + `katex/fonts/*.woff2`) | Math typesetting | MIT ([`licenses/KaTeX-MIT-LICENSE.txt`](licenses/KaTeX-MIT-LICENSE.txt)) |
+| [Mermaid](https://github.com/mermaid-js/mermaid) v11.16.1 (`mermaid.min.js`) | Diagrams from text | MIT ([`licenses/Mermaid-MIT-LICENSE.txt`](licenses/Mermaid-MIT-LICENSE.txt)) |
+
+KaTeX and Mermaid are loaded on first use by `static/js/markdown.js` rather than
+from `index.html`, so a session that renders no math and no diagram never fetches
+either. Only the `.woff2` KaTeX fonts are shipped, matching `static/fonts/`; the
+`.woff` and `.ttf` variants its stylesheet also lists are never requested by a
+browser that supports `woff2`. The bundles are the published npm artifacts,
+unmodified — `.gitattributes` turns the whitespace check off for `static/lib/`
+so they can stay byte-identical to upstream.
 
 ## Front-end libraries loaded at runtime (CDN)
 
@@ -72,8 +82,6 @@ Referenced from `cdn.jsdelivr.net` / `cdnjs.cloudflare.com` at runtime — not v
 
 | Library | Purpose | License |
 |---|---|---|
-| [KaTeX](https://github.com/KaTeX/KaTeX) 0.16.22 | Math typesetting | MIT |
-| [Mermaid](https://github.com/mermaid-js/mermaid) 11 | Diagrams from text | MIT |
 | [Pyodide](https://github.com/pyodide/pyodide) 0.27.5 | In-browser Python runtime | MPL-2.0 |
 | [PDFObject](https://github.com/pipwerks/PDFObject) 2.1.1 | Inline PDF embedding | MIT |
 
@@ -86,6 +94,7 @@ Bundled in `static/fonts/`:
 | [Fira Code](https://github.com/tonsky/FiraCode) | SIL Open Font License 1.1 | Nikita Prokopov & contributors |
 | [Inter](https://github.com/rsms/inter) | SIL Open Font License 1.1 | Rasmus Andersson |
 | [GohuFont](https://font.gohu.org/) (`fonts/custom/GohuFont.ttf`) | WTFPL | Hugo Chargois |
+| [OpenDyslexic](https://opendyslexic.org/) (`fonts/OpenDyslexic-{Regular,Bold}.woff2`) | SIL Open Font License 1.1 ([`licenses/OpenDyslexic-OFL.txt`](licenses/OpenDyslexic-OFL.txt)) | Abbie Gonzalez |
 
 ## Python dependencies
 
@@ -118,6 +127,7 @@ Core (`requirements.txt`) and optional (`requirements-optional.txt`):
 | croniter | MIT |
 | pytest / pytest-asyncio | MIT / Apache-2.0 |
 | duckduckgo-search (optional) | MIT |
+| markitdown (optional — Office/EPUB text extraction) | MIT |
 | **PyMuPDF** *(optional — form-filling only)* | **AGPL-3.0** — see note below |
 
 ## Companion services (interoperated with, not bundled)
@@ -152,6 +162,9 @@ concerns from earlier are resolved:
   deployment (Artifex also sells a commercial PyMuPDF license that lifts this).
 - **`caldav`** (Python lib) is **dual-licensed GPL-3.0-or-later OR Apache-2.0**.
   Odysseus uses it under **Apache-2.0**, which is permissive and MIT-compatible.
+- **`markitdown`** (Microsoft) is **MIT** and used only as an *optional* dependency for Office/EPUB text
+  extraction (`src/markitdown_runtime.py`), lazy-imported with graceful fallback — the MIT core runs without
+  it. The cloud `az-doc-intel` extra is deliberately **not** installed, keeping extraction fully local.
 
 ---
 

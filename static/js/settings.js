@@ -3,103 +3,83 @@
 
 import uiModule from './ui.js';
 import searchModule from './search.js';
-import { makeWindowDraggable } from './windowDrag.js';
-import { clearDockSide } from './modalSnap.js';
+import { byId } from './settings/dom.js';
+import {
+  getSettingsRegistryIssues,
+  isAdminManagedSettingsTab,
+} from './settings/registry.js';
+import { bindSettingsSearch } from './settings/search.js';
+import { bindSettingsSidebar } from './settings/sidebar.js';
+import {
+  activateSettingsPanel,
+  getActiveSettingsTab,
+  bindSettingsNavigation,
+} from './settings/navigation.js';
+import {
+  bindSettingsDrag,
+  bindSettingsClose,
+  bindOpenPromptModalLink,
+  showSettingsModal,
+  hideSettingsModal,
+} from './settings/lifecycle.js';
 import { sortModelIds } from './modelSort.js';
+import { providerLogo } from './providers.js';
+import { isAltGrEvent } from './platform.js';
+import { bindMenuDismiss } from './escMenuStack.js';
+import { invalidateSettings } from './appConfig.js';
 
 let initialized = false;
 let modalEl = null;
+let _authPolicy = { password_min_length: 8 };
 
-function el(id) { return document.getElementById(id); }
-function esc(s) { return uiModule.esc(s); }
-
-/* ── Tab switching ── */
-const ADMIN_TABS = new Set(['services', 'integrations', 'tools', 'users', 'system']);
-
-function initTabs() {
-  modalEl.querySelectorAll('[data-settings-tab]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const tab = btn.dataset.settingsTab;
-      // Lazy-init admin when first clicking an admin tab
-      if (ADMIN_TABS.has(tab) && window.adminModule && typeof window.adminModule.open === 'function') {
-        window.adminModule.open(tab);
-        return;
-      }
-      modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-      modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
-      // Mark when the Appearance tab is open so the modal can go
-      // semi-transparent — lets the user see the rest of the UI react as
-      // they flip toggles instead of having to close + reopen the modal.
-      document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
-      syncAppearanceOpacity(tab === 'appearance');
-      if (tab === 'ai') refreshAiModelEndpoints();
+/**
+ * POST a settings patch, then drop the shared snapshot in appConfig.js.
+ *
+ * Every write in this file goes through here so no save path can forget the
+ * invalidation — a stale settings object served for the rest of the session is
+ * a worse bug than the duplicate fetches the cache removes. The invalidation is
+ * in a `finally` because a request that throws on the way back may still have
+ * been applied server-side.
+ *
+ * Reads in this file deliberately stay direct fetches: this panel is the writer
+ * and edits what it reads, so it must see the authoritative state, not a cache.
+ */
+async function _postSettings(body) {
+  try {
+    return await fetch('/api/auth/settings', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     });
-  });
-}
-
-/* ── Dragging ── */
-function initDrag() {
-  const header = modalEl.querySelector('.modal-header');
-  const content = modalEl.querySelector('.settings-modal-content');
-  if (!header || !content) return;
-  // Skip interactive controls in the header (e.g. the opacity slider) so
-  // grabbing them doesn't start a window-drag.
-  makeWindowDraggable(modalEl, {
-    content,
-    header,
-    skipSelector: 'button, input, select, .theme-opacity-wrap',
-    enableDock: false,
-  });
-}
-
-function resetWindowPlacement() {
-  const content = modalEl && modalEl.querySelector('.settings-modal-content');
-  if (!content) return;
-  const hadLeft = modalEl.classList.contains('modal-left-docked');
-  const hadRight = modalEl.classList.contains('modal-right-docked');
-  modalEl.classList.remove('modal-left-docked', 'modal-right-docked');
-  if (hadLeft) clearDockSide('left', modalEl);
-  if (hadRight) clearDockSide('right', modalEl);
-  if (content._leftDockNavObs) {
-    try { content._leftDockNavObs.navObs && content._leftDockNavObs.navObs.disconnect(); } catch (_) {}
-    try { window.removeEventListener('resize', content._leftDockNavObs.reanchor); } catch (_) {}
-    delete content._leftDockNavObs;
+  } finally {
+    invalidateSettings();
   }
-  delete content._preDockSnapshot;
-  delete content._dockSide;
-  delete content._dockSuspended;
-  delete content.dataset._tilePreSnap;
-  delete content.dataset._tileZone;
-  [
-    'position', 'left', 'top', 'right', 'bottom', 'margin', 'transform',
-    'width', 'height', 'max-width', 'max-height', 'border-radius', 'transition',
-  ].forEach(prop => content.style.removeProperty(prop));
 }
 
-/* ── Close on backdrop / X ── */
-function initClose() {
-  modalEl.querySelector('.close-btn').addEventListener('click', close);
-  modalEl.addEventListener('mousedown', e => {
-    if (uiModule.isTouchInsideModal()) return;
-    if (e.target === modalEl) close();
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape' || !modalEl || modalEl.classList.contains('hidden')) return;
-    // If an integration edit/add form is open inside the modal, close
-    // just that — don't dismiss the whole settings modal. (Pressing
-    // ESC mid-edit and losing the modal was a fast-typing footgun.)
-    const innerForm = modalEl.querySelector('#unified-intg-form, #set-email-accounts-form');
-    if (innerForm && innerForm.style.display !== 'none' && innerForm.children.length > 0) {
-      e.preventDefault();
-      e.stopPropagation();
-      innerForm.style.display = 'none';
-      innerForm.innerHTML = '';
-      return;
-    }
-    e.preventDefault();
-    e.stopPropagation();
-    close();
-  });
+const el = byId;
+function esc(s) { return uiModule.esc(s); }
+function safeRasterDataUrl(raw) {
+  const value = String(raw || '').trim();
+  return /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(value) ? value : '';
+}
+
+/* ── Settings shell coordination ── */
+function onSettingsPanelActivated(tab) {
+  // Appearance keeps its existing transparent preview behavior.
+  document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
+  syncAppearanceOpacity(tab === 'appearance');
+
+  // AI endpoints are intentionally refreshed only when entering the AI panel.
+  if (tab === 'ai') refreshAiModelEndpoints();
+}
+
+function openAdminSettingsTab(tab) {
+  if (window.adminModule && typeof window.adminModule.open === 'function') {
+    window.adminModule.open(tab);
+    return true;
+  }
+  return false;
 }
 
 /* ── Appearance-tab opacity slider ──
@@ -200,6 +180,41 @@ function _fillEndpointSelect(selectEl, endpoints, selected, keepBlank) {
   } else if (blankText !== null) {
     selectEl.value = '';
   }
+  _syncEndpointLogo(selectEl);
+}
+
+// Mirror the selected model's provider logo into a sibling <span id="<selectId>-logo">.
+// Wires the change listener exactly once so we can call this every time the
+// select is repopulated without piling on duplicate handlers.
+function _syncModelLogo(selectEl) {
+  if (!selectEl) return;
+  const logoEl = document.getElementById(selectEl.id + '-logo');
+  if (!logoEl) return;
+  const apply = () => { logoEl.innerHTML = providerLogo(selectEl.value) || ''; };
+  apply();
+  if (!selectEl.dataset.logoSync) {
+    selectEl.dataset.logoSync = '1';
+    selectEl.addEventListener('change', apply);
+  }
+}
+
+// Same idea but for endpoint dropdowns where the <option value="…">
+// is an opaque endpoint UUID — fall back to the option's text label
+// so providerLogo() can pattern-match (Anthropic, OpenAI, Ollama, …).
+function _syncEndpointLogo(selectEl) {
+  if (!selectEl) return;
+  const logoEl = document.getElementById(selectEl.id + '-logo');
+  if (!logoEl) return;
+  const apply = () => {
+    const opt = selectEl.options[selectEl.selectedIndex];
+    const label = (opt && opt.textContent) || selectEl.value || '';
+    logoEl.innerHTML = providerLogo(label) || '';
+  };
+  apply();
+  if (!selectEl.dataset.epLogoSync) {
+    selectEl.dataset.epLogoSync = '1';
+    selectEl.addEventListener('change', apply);
+  }
 }
 
 function _fillModelSelect(selectEl, models, selected, keepBlank) {
@@ -226,6 +241,7 @@ function _fillModelSelect(selectEl, models, selected, keepBlank) {
   } else if (blankText !== null) {
     selectEl.value = '';
   }
+  _syncModelLogo(selectEl);
 }
 
 function _registerAiEndpointRefresh(fn) {
@@ -286,10 +302,7 @@ function _bindFallbackWidget(opts) {
     var body = {};
     body[settingKey] = clean;
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+      await _postSettings(body);
     } catch (e) { console.warn('[fallback] save failed for ' + settingKey, e); }
   }
 
@@ -333,7 +346,7 @@ function _bindFallbackWidget(opts) {
       rm.type = 'button';
       rm.className = 'settings-fallback-remove';
       rm.title = 'Remove fallback';
-      rm.innerHTML = '&times;';
+      rm.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
       rm.addEventListener('click', function() {
         current.splice(idx, 1);
         render();
@@ -368,14 +381,7 @@ async function initDefaultChat() {
   var epSel = el('set-defaultEpSelect');
   var modelSel = el('set-defaultModelSelect');
   var msg = el('set-defaultChatMsg');
-  var fbContainer = el('set-defaultFallbacks');
-  var addFbBtn = el('set-defaultAddFallback');
   var _endpoints = [];
-  var _fallbacks = []; // [{endpoint_id, model}] — tried in order if primary fails
-
-  function enabledEndpoints() {
-    return _endpoints.filter(function(e) { return e.is_enabled; });
-  }
 
   // Fill any <select> with the models for a given endpoint id.
   function fillModels(selectEl, epId, selected) {
@@ -392,64 +398,6 @@ async function initDefaultChat() {
   function refreshEndpointOptions(selectedEndpoint, selectedModel) {
     _fillEndpointSelect(epSel, _endpoints, selectedEndpoint !== undefined ? selectedEndpoint : epSel.value, false);
     refreshModels(selectedModel !== undefined ? selectedModel : modelSel.value);
-    renderFallbacks();
-  }
-
-  // Render the fallback chain. Each row is endpoint + model + remove.
-  function renderFallbacks() {
-    fbContainer.innerHTML = '';
-    _fallbacks.forEach(function(fb, idx) {
-      var row = document.createElement('div');
-      row.className = 'settings-fallback-row';
-
-      var num = document.createElement('span');
-      num.className = 'settings-fallback-num';
-      num.textContent = (idx + 1) + '.';
-
-      var epS = document.createElement('select');
-      epS.className = 'settings-select';
-      enabledEndpoints().forEach(function(ep) {
-        var o = document.createElement('option');
-        o.value = ep.id;
-        o.textContent = ep.name + (ep.online ? '' : ' (offline)');
-        epS.appendChild(o);
-      });
-      var first = enabledEndpoints()[0];
-      epS.value = fb.endpoint_id || (first ? first.id : '');
-
-      var mS = document.createElement('select');
-      mS.className = 'settings-select';
-      fillModels(mS, epS.value, fb.model);
-
-      // Keep the model in sync with the values actually shown.
-      fb.endpoint_id = epS.value;
-      fb.model = mS.value;
-
-      epS.addEventListener('change', function() {
-        fb.endpoint_id = epS.value;
-        fillModels(mS, epS.value, '');
-        fb.model = mS.value;
-        saveDefault();
-      });
-      mS.addEventListener('change', function() { fb.model = mS.value; saveDefault(); });
-
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'settings-fallback-remove';
-      rm.title = 'Remove fallback';
-      rm.innerHTML = '&times;';
-      rm.addEventListener('click', function() {
-        _fallbacks.splice(idx, 1);
-        renderFallbacks();
-        saveDefault();
-      });
-
-      row.appendChild(num);
-      row.appendChild(epS);
-      row.appendChild(mS);
-      row.appendChild(rm);
-      fbContainer.appendChild(row);
-    });
   }
 
   try {
@@ -457,38 +405,21 @@ async function initDefaultChat() {
     var settings = await res.json();
     if (settings.default_endpoint_id) epSel.value = settings.default_endpoint_id;
     refreshModels(settings.default_model || '');
-    _fallbacks = Array.isArray(settings.default_model_fallbacks)
-      ? settings.default_model_fallbacks.map(function(f) {
-          return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' };
-        })
-      : [];
-    renderFallbacks();
   } catch (e) { console.warn('Failed to load default chat settings', e); }
+
+  epSel.addEventListener('change', function() { refreshModels(''); saveDefault(); });
+  modelSel.addEventListener('change', saveDefault);
 
   async function saveDefault() {
     try {
-      var clean = _fallbacks.filter(function(f) { return f.endpoint_id && f.model; });
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          default_endpoint_id: epSel.value,
-          default_model: modelSel.value,
-          default_model_fallbacks: clean
-        })
+      await _postSettings({
+        default_endpoint_id: epSel.value,
+        default_model: modelSel.value
       });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
-
-  epSel.addEventListener('change', function() { refreshModels(''); saveDefault(); });
-  modelSel.addEventListener('change', saveDefault);
-  if (addFbBtn) addFbBtn.addEventListener('click', function() {
-    var first = enabledEndpoints()[0];
-    _fallbacks.push({ endpoint_id: first ? first.id : '', model: '' });
-    renderFallbacks();
-    saveDefault();
-  });
 
   _registerAiEndpointRefresh(function(endpoints) {
     _endpoints = endpoints;
@@ -538,12 +469,9 @@ async function initUtilityModel() {
   // no toggle, "—" means "unset, use chat").
   async function saveUtility() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          utility_endpoint_id: epSel.value || '',
-          utility_model: modelSel.value || ''
-        })
+      await _postSettings({
+        utility_endpoint_id: epSel.value || '',
+        utility_model: modelSel.value || ''
       });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 1500);
@@ -636,10 +564,7 @@ async function initTeacherModel() {
         spec = ep ? (modelSel.value + '@' + ep.name) : modelSel.value;
       }
       var enabled = enabledToggle ? !!enabledToggle.checked : false;
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ teacher_enabled: enabled, teacher_model: spec })
-      });
+      await _postSettings({ teacher_enabled: enabled, teacher_model: spec });
       msg.textContent = enabled ? (spec ? 'Saved' : 'Pick an endpoint + model') : 'Disabled';
       msg.style.color = enabled && !spec ? 'var(--red)' : 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
@@ -701,7 +626,7 @@ async function initImageSettings() {
     const settings = await settingsRes.json();
     if (settings.image_model) modelSel.value = settings.image_model;
     if (settings.image_quality) qualSel.value = settings.image_quality;
-    if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled !== false;
+    if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled === true;
   } catch (e) { console.warn('Failed to load settings', e); }
 
   function syncImgDisabled() {
@@ -714,8 +639,8 @@ async function initImageSettings() {
 
   async function saveSettings() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : true, image_model: modelSel.value, image_quality: qualSel.value }) });
+      const res = await _postSettings({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value });
+      if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
@@ -762,6 +687,7 @@ async function initVisionSettings() {
     const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     const settings = await settingsRes.json();
     if (settings.vision_model) vlSel.value = settings.vision_model;
+    _syncModelLogo(vlSel);
     if (enabledToggle) enabledToggle.checked = settings.vision_enabled !== false;
     visionFallbackWidget = _bindFallbackWidget({
       containerId: 'set-visionFallbacks',
@@ -787,8 +713,7 @@ async function initVisionSettings() {
 
   async function saveSettings() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ vision_enabled: enabledToggle ? enabledToggle.checked : true, vision_model: vlSel.value }) });
+      await _postSettings({ vision_enabled: enabledToggle ? enabledToggle.checked : true, vision_model: vlSel.value });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
@@ -869,8 +794,7 @@ async function initTtsSettings() {
 
   async function saveTTS() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' }) });
+      await _postSettings({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' });
       ttsMsg.textContent = 'Saved'; ttsMsg.style.color = 'var(--fg)'; setTimeout(() => { ttsMsg.textContent = ''; }, 2000);
       if (window.aiTTSManager) window.aiTTSManager.checkAvailability();
     } catch (e) { ttsMsg.textContent = 'Failed to save'; ttsMsg.style.color = 'var(--red)'; }
@@ -1031,9 +955,7 @@ async function initSttSettings() {
   async function saveSTT() {
     try {
       var enabled = sttEnabledToggle ? sttEnabledToggle.checked : false;
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() }) });
+      await _postSettings({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() });
       sttMsg.textContent = 'Saved'; sttMsg.style.color = 'var(--fg)'; setTimeout(() => { sttMsg.textContent = ''; }, 2000);
       // Notify voiceRecorder of effective provider and update send button icon
       if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = effectiveProvider();
@@ -1052,13 +974,16 @@ async function initSttSettings() {
    SEARCH TAB
    ═══════════════════════════════════════════ */
 
+var _LINK = function(href, text) {
+  return '<a href="' + href + '" target="_blank" rel="noopener noreferrer" style="color:var(--accent, var(--red));text-decoration:underline;">' + text + '</a>';
+};
 var _searchProviderHints = {
-  searxng: 'Self-hosted SearXNG instance. Leave URL empty to use the SEARXNG_INSTANCE env var.',
-  duckduckgo: 'Free search — no API key required. Works out of the box.',
-  brave: 'Get your API key from brave.com/search/api',
-  google_pse: 'Requires a Google API key and a Programmable Search Engine ID (CX). Create one at programmablesearchengine.google.com',
-  tavily: 'AI-optimized search. 1,000 free credits/month at tavily.com',
-  serper: 'Google results via API. 2,500 free queries at serper.dev',
+  searxng: 'Private, self-hosted instance. Leave URL empty to use the SEARXNG_INSTANCE env var.',
+  duckduckgo: 'No API key needed, but rate-limited — heavy use can return empty results. Configure a fallback below.',
+  brave: 'Get your API key from ' + _LINK('https://brave.com/search/api/', 'brave.com/search/api'),
+  google_pse: 'Requires a Google API key and a Programmable Search Engine ID (CX). Create one at ' + _LINK('https://programmablesearchengine.google.com/', 'programmablesearchengine.google.com'),
+  tavily: 'AI-optimized search. 1,000 free credits/month at ' + _LINK('https://tavily.com/', 'tavily.com'),
+  serper: 'Google results via API. 2,500 free queries at ' + _LINK('https://serper.dev/', 'serper.dev'),
   disabled: 'Web search and deep research tools will be unavailable.',
 };
 var _searchNeedsKey = { brave: 1, google_pse: 1, tavily: 1, serper: 1 };
@@ -1074,6 +999,7 @@ var _searchKeyFields = {
 async function initSearchSettings() {
   var provSel = el('set-searchProvider');
   var countSel = el('set-searchResultCount');
+  var countCustomInput = el('set-searchResultCountCustom');
   var urlInput = el('set-searchUrl');
   var urlRow = el('set-searchUrlRow');
   var keyInput = el('set-searchApiKey');
@@ -1096,7 +1022,7 @@ async function initSearchSettings() {
     urlRow.style.display = prov === 'searxng' ? 'flex' : 'none';
     keyRow.style.display = _searchNeedsKey[prov] ? 'flex' : 'none';
     cxRow.style.display = prov === 'google_pse' ? 'flex' : 'none';
-    hint.textContent = _searchProviderHints[prov] || '';
+    hint.innerHTML = _searchProviderHints[prov] || '';
     if (prov === 'brave') keyInput.placeholder = 'Brave API key';
     else if (prov === 'google_pse') keyInput.placeholder = 'Google API key';
     else if (prov === 'tavily') keyInput.placeholder = 'Tavily API key';
@@ -1105,14 +1031,36 @@ async function initSearchSettings() {
     loadKeyForProvider(prov);
   }
 
+  function updateCountDisplay() {
+    var val = _settings.search_result_count || 5;
+    var presets = ['3', '5', '10', '20'];
+    if (presets.includes(String(val))) {
+      countSel.value = String(val);
+      countCustomInput.style.display = 'none';
+    } else {
+      countSel.value = 'custom';
+      countCustomInput.value = Math.max(1, Math.min(100, val));
+      countCustomInput.style.display = 'block';
+    }
+  }
+
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     _settings = await res.json();
     if (_settings.search_provider) provSel.value = _settings.search_provider;
-    if (_settings.search_result_count) countSel.value = String(_settings.search_result_count);
+    updateCountDisplay();
     if (_settings.search_url) urlInput.value = _settings.search_url;
     if (_settings.google_pse_cx) cxInput.value = _settings.google_pse_cx;
   } catch (e) { console.warn('Failed to load search settings', e); }
+
+  countSel.addEventListener('change', function() {
+    if (this.value === 'custom') {
+      countCustomInput.style.display = 'block';
+      countCustomInput.focus();
+    } else {
+      countCustomInput.style.display = 'none';
+    }
+  });
 
   updateVisibility();
 
@@ -1141,9 +1089,20 @@ async function initSearchSettings() {
   async function saveSearch() {
     try {
       var prov = provSel.value;
+      var resultCount;
+      if (countSel.value === 'custom') {
+        var customVal = parseInt(countCustomInput.value, 10);
+        if (isNaN(customVal) || customVal < 1 || customVal > 100) {
+          resultCount = _settings.search_result_count || 5;
+        } else {
+          resultCount = customVal;
+        }
+      } else {
+        resultCount = parseInt(countSel.value, 10);
+      }
       var payload = {
         search_provider: prov,
-        search_result_count: parseInt(countSel.value, 10),
+        search_result_count: resultCount,
         search_url: urlInput.value.trim(),
         google_pse_cx: cxInput.value.trim(),
       };
@@ -1152,10 +1111,7 @@ async function initSearchSettings() {
         payload[kf] = keyInput.value.trim();
         _settings[kf] = keyInput.value.trim();
       }
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      await _postSettings(payload);
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(refreshStatus, 2000);
       if (searchModule && searchModule.refresh) searchModule.refresh();
@@ -1227,73 +1183,87 @@ async function initSearchSettings() {
       .map(function(o) { return { value: o.value, label: o.textContent, logo: o.dataset.searchLogo }; })
       .filter(function(o) { return !inChain.has(o.value); });
   }
+  var addBtn = el('set-searchAddFallback');
+  var TRASH_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
   function _renderFallbackChain() {
     if (!fbWrap) return;
     var chain = (_settings.search_fallback_chain || []).slice();
-    var esc = function(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); };
-    var chipsHtml = chain.map(function(p, i) {
-      var label = _searchLabels[p] || p;
-      var logo = _SEARCH_PROVIDER_LOGOS[p] || '';
-      return '<span class="search-fb-chip" draggable="true" data-idx="' + i + '" data-value="' + esc(p) + '">' +
-        '<span class="search-fb-grip" title="Drag to reorder">⋮⋮</span>' +
-        '<span class="search-fb-logo">' + logo + '</span>' +
-        '<span>' + esc(label) + '</span>' +
-        '<button type="button" class="search-fb-remove" data-value="' + esc(p) + '" title="Remove">&times;</button>' +
-      '</span>';
-    }).join('');
-    var addOptions = _availableFallbackOptions();
-    var addSelect = addOptions.length
-      ? '<select class="search-fb-add" id="search-fb-add"><option value="">+ Add</option>' +
-          addOptions.map(function(o) { return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>'; }).join('') +
-        '</select>'
-      : '';
-    fbWrap.innerHTML = chipsHtml + addSelect;
-    // Wire chip remove + drag-reorder + add
-    fbWrap.querySelectorAll('.search-fb-remove').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        var next = (_settings.search_fallback_chain || []).filter(function(p) { return p !== btn.dataset.value; });
-        _saveFallbackChain(next);
+    fbWrap.innerHTML = '';
+    chain.forEach(function(p, idx) {
+      var row = document.createElement('div');
+      row.className = 'settings-fallback-row';
+
+      var num = document.createElement('span');
+      num.className = 'settings-fallback-num';
+      num.textContent = (idx + 1) + '.';
+      row.appendChild(num);
+
+      // Inline logo so the row identifies its provider at a glance even
+      // before opening the dropdown. The <select> below still drives
+      // selection; we just mirror its value into the logo span.
+      var logoWrap = document.createElement('span');
+      logoWrap.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;color:var(--fg);';
+      var setLogo = function(val) {
+        var srcOpt = Array.from(provSel.options).find(function(o) { return o.value === val; });
+        logoWrap.innerHTML = srcOpt ? _searchProviderLogoSvg(srcOpt.dataset.searchLogo) : '';
+      };
+      setLogo(p);
+      row.appendChild(logoWrap);
+
+      var sel = document.createElement('select');
+      sel.className = 'settings-select';
+      // Options: this row's current value + every other provider not yet in the chain (and not the primary or 'disabled').
+      var primary = provSel.value;
+      var others = new Set(chain.filter(function(x) { return x !== p; }).concat([primary, 'disabled']));
+      Array.from(provSel.options).forEach(function(o) {
+        if (o.value !== p && others.has(o.value)) return;
+        var opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.textContent;
+        sel.appendChild(opt);
       });
-    });
-    var addSel = el('search-fb-add');
-    if (addSel) {
-      addSel.addEventListener('change', function() {
-        if (!addSel.value) return;
+      sel.value = p;
+      sel.addEventListener('change', function() {
+        setLogo(sel.value);
         var next = (_settings.search_fallback_chain || []).slice();
-        if (!next.includes(addSel.value)) next.push(addSel.value);
+        next[idx] = sel.value;
         _saveFallbackChain(next);
       });
+      row.appendChild(sel);
+
+      var rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'settings-fallback-remove';
+      rm.title = 'Remove fallback';
+      rm.innerHTML = TRASH_SVG;
+      rm.addEventListener('click', function() {
+        var next = (_settings.search_fallback_chain || []).filter(function(x, i) { return i !== idx; });
+        _saveFallbackChain(next);
+      });
+      row.appendChild(rm);
+
+      fbWrap.appendChild(row);
+    });
+    // Add-fallback button: disabled when there are no remaining providers to add.
+    if (addBtn) {
+      var hasMore = _availableFallbackOptions().length > 0;
+      addBtn.style.display = hasMore ? '' : 'none';
     }
-    // Drag-reorder
-    var dragging = null;
-    fbWrap.querySelectorAll('.search-fb-chip').forEach(function(chip) {
-      chip.addEventListener('dragstart', function() {
-        dragging = chip; chip.classList.add('dragging');
-      });
-      chip.addEventListener('dragend', function() {
-        if (dragging) dragging.classList.remove('dragging');
-        dragging = null;
-        // Persist new order
-        var order = Array.from(fbWrap.querySelectorAll('.search-fb-chip')).map(function(c) { return c.dataset.value; });
-        _saveFallbackChain(order);
-      });
-      chip.addEventListener('dragover', function(e) {
-        e.preventDefault();
-        if (!dragging || dragging === chip) return;
-        var rect = chip.getBoundingClientRect();
-        var after = (e.clientX - rect.left) > rect.width / 2;
-        chip.parentNode.insertBefore(dragging, after ? chip.nextSibling : chip);
-      });
+  }
+  if (addBtn && !addBtn._wired) {
+    addBtn._wired = true;
+    addBtn.addEventListener('click', function() {
+      var avail = _availableFallbackOptions();
+      if (!avail.length) return;
+      var next = (_settings.search_fallback_chain || []).slice();
+      next.push(avail[0].value);
+      _saveFallbackChain(next);
     });
   }
   async function _saveFallbackChain(chain) {
     _settings.search_fallback_chain = chain;
     try {
-      await fetch('/api/auth/settings', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ search_fallback_chain: chain }),
-      });
+      await _postSettings({ search_fallback_chain: chain });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(refreshStatus, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1316,8 +1286,18 @@ async function initSearchSettings() {
       // Persist current form values first so the test uses what's on screen.
       await saveSearch();
       testBtn.disabled = true;
-      var orig = testBtn.textContent;
-      testBtn.textContent = 'Testing...';
+      var origHtml = testBtn.innerHTML;
+      var wp = null;
+      try {
+        var sp = window.spinnerModule || (await import('./spinner.js')).default;
+        wp = sp.createWhirlpool(11);
+        wp.element.style.cssText = 'display:inline-flex;width:11px;height:11px;margin:0 4px 0 0;';
+        testBtn.innerHTML = '';
+        testBtn.appendChild(wp.element);
+        testBtn.appendChild(document.createTextNode('Testing'));
+      } catch (_) {
+        testBtn.innerHTML = origHtml.replace(/>Test\s*$/, '>Testing...');
+      }
       msg.textContent = '';
       var t0 = performance.now();
       try {
@@ -1343,7 +1323,8 @@ async function initSearchSettings() {
         msg.textContent = '✗ Test failed: ' + (e && e.message ? e.message : e);
         msg.style.color = 'var(--red)';
       } finally {
-        testBtn.disabled = false; testBtn.textContent = orig;
+        if (wp) { try { wp.destroy(); } catch (_) {} }
+        testBtn.disabled = false; testBtn.innerHTML = origHtml;
       }
     });
   }
@@ -1367,6 +1348,7 @@ async function initResearchSettings() {
   var tokensInput = el('set-researchMaxTokens');
   var extractTimeoutInput = el('set-researchExtractTimeout');
   var extractConcurrencyInput = el('set-researchExtractConcurrency');
+  var runTimeoutInput = el('set-researchRunTimeout');
   var msg = el('set-researchMsg');
   var endpoints = [];
 
@@ -1389,6 +1371,9 @@ async function initResearchSettings() {
     if (settings.research_max_tokens) tokensInput.value = settings.research_max_tokens;
     if (settings.research_extraction_timeout_seconds) extractTimeoutInput.value = settings.research_extraction_timeout_seconds;
     if (settings.research_extraction_concurrency) extractConcurrencyInput.value = settings.research_extraction_concurrency;
+    if (settings.research_run_timeout_seconds !== undefined && settings.research_run_timeout_seconds !== null) {
+      runTimeoutInput.value = settings.research_run_timeout_seconds;
+    }
   } catch (e) { console.warn('Failed to load research settings', e); }
 
   function showStatus() {
@@ -1406,6 +1391,12 @@ async function initResearchSettings() {
     }
     if (extractConcurrencyInput.value) {
       parts.push('Parallel: ' + extractConcurrencyInput.value);
+    }
+    if (runTimeoutInput.value !== '') {
+      var rtv = parseInt(runTimeoutInput.value, 10);
+      if (!isNaN(rtv)) {
+        parts.push(rtv === 0 ? 'Max time: no limit' : 'Max time: ' + rtv + 's');
+      }
     }
     if (parts.length) {
       msg.textContent = parts.join(' · ');
@@ -1425,14 +1416,18 @@ async function initResearchSettings() {
     var tv = parseInt(tokensInput.value, 10);
     if (tv && tv >= 1024) payload.research_max_tokens = tv;
     var et = parseInt(extractTimeoutInput.value, 10);
-    if (et && et >= 15 && et <= 600) payload.research_extraction_timeout_seconds = et;
+    if (et && et >= 15 && et <= 3600) payload.research_extraction_timeout_seconds = et;
     var ec = parseInt(extractConcurrencyInput.value, 10);
     if (ec && ec >= 1 && ec <= 12) payload.research_extraction_concurrency = ec;
+    if (runTimeoutInput.value !== '') {
+      var rt = parseInt(runTimeoutInput.value, 10);
+      // 0 = no limit (disables the hard timeout); otherwise 60s..86400s (24h)
+      if (!isNaN(rt) && (rt === 0 || (rt >= 60 && rt <= 86400))) {
+        payload.research_run_timeout_seconds = rt;
+      }
+    }
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      await _postSettings(payload);
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(showStatus, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1446,6 +1441,7 @@ async function initResearchSettings() {
   tokensInput.addEventListener('change', saveResearch);
   extractTimeoutInput.addEventListener('change', saveResearch);
   extractConcurrencyInput.addEventListener('change', saveResearch);
+  runTimeoutInput.addEventListener('change', saveResearch);
 
   _registerAiEndpointRefresh(function(nextEndpoints) {
     endpoints = nextEndpoints;
@@ -1458,6 +1454,14 @@ async function initResearchSettings() {
 async function initResearchSearchSettings() {
   var searchSel = el('set-researchSearch');
   var msg = el('set-researchSearchMsg');
+  var logoEl = el('set-researchSearch-logo');
+
+  function updateSearchLogo() {
+    if (!logoEl) return;
+    var opt = searchSel.selectedOptions[0];
+    var key = opt && opt.dataset ? opt.dataset.searchLogo : '';
+    logoEl.innerHTML = key ? (_SEARCH_PROVIDER_LOGOS[key] || '') : '';
+  }
 
   function updateSearchOptions(settings) {
     var options = searchSel.querySelectorAll('option');
@@ -1482,25 +1486,25 @@ async function initResearchSearchSettings() {
     var settings = await res.json();
     if (settings.research_search_provider) searchSel.value = settings.research_search_provider;
     updateSearchOptions(settings);
+    updateSearchLogo();
   } catch (e) { console.warn('Failed to load research search settings', e); }
 
   async function saveResearchSearch() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ research_search_provider: searchSel.value })
-      });
+      await _postSettings({ research_search_provider: searchSel.value });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
 
-  searchSel.addEventListener('change', saveResearchSearch);
+  searchSel.addEventListener('change', function() { updateSearchLogo(); saveResearchSearch(); });
 }
 
 /* ── Agent Settings (AI tab) ── */
 async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
+  var roundsInput = el('set-agentMaxRounds');
+  var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
 
@@ -1508,23 +1512,44 @@ async function initAgentSettings() {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
     if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
+    if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
+    if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
   } catch (e) {}
 
+  // Clamp + coerce a raw input to an int in [lo, hi]; falls back to `dflt`
+  // when blank/non-numeric. Mirrors the server-side validation.
+  function clampInt(raw, lo, hi, dflt) {
+    var n = parseInt(raw, 10);
+    if (isNaN(n)) return dflt;
+    return Math.max(lo, Math.min(n, hi));
+  }
+
   async function save() {
-    var val = parseInt(toolsInput.value, 10) || 0;
+    var tools = clampInt(toolsInput.value, 0, 1000, 0);
+    var rounds = roundsInput ? clampInt(roundsInput.value, 1, 200, 20) : null;
+    toolsInput.value = tools;                       // reflect the clamped value
+    if (roundsInput) roundsInput.value = rounds;
+    var payload = { agent_max_tool_calls: tools };
+    if (rounds != null) payload.agent_max_rounds = rounds;
+    if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_max_tool_calls: val })
-      });
-      msg.textContent = val > 0 ? 'Limit: ' + val + ' tool calls per message' : 'Unlimited';
+      await _postSettings(payload);
+      msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
+        (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
 
   toolsInput.addEventListener('change', save);
+  if (roundsInput) roundsInput.addEventListener('change', save);
+  if (supInput) supInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
-  msg.textContent = cur > 0 ? 'Limit: ' + cur + ' tool calls per message' : 'Unlimited';
+  var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
+  msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
+    (curR != null ? ' · ' + curR + ' steps/message' : '') +
+    (supInput && supInput.checked ? ' · supervisor on' : '');
+
 }
 
 /* ═══════════════════════════════════════════
@@ -1585,15 +1610,25 @@ function initAppearance() {
     });
   });
 
-  var resetBtn = el('set-uiVisResetBtn');
-  if (resetBtn) {
-    resetBtn.addEventListener('click', function() {
-      localStorage.removeItem('odysseus-ui-visibility');
+  // Per-section reset buttons (arrow-circle-back icon in each card's h2).
+  // Removes only the keys belonging to this section from the persisted
+  // visibility map so other sections keep their user settings.
+  modalEl.querySelectorAll('[data-vis-reset]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var card = btn.closest('.admin-card');
+      if (!card) return;
+      var keys = Array.from(card.querySelectorAll('[data-ui-key]'))
+        .map(function(c) { return c.dataset.uiKey; })
+        .filter(Boolean);
+      if (!keys.length) return;
+      var s = window.loadUIVis ? window.loadUIVis() : {};
+      keys.forEach(function(k) { delete s[k]; });
+      if (window.saveUIVis) window.saveUIVis(s);
       syncAppearanceCheckboxes();
       syncPrivacyCheckboxes();
-      window.applyUIVis({});
+      if (window.applyUIVis) window.applyUIVis(s);
     });
-  }
+  });
 }
 
 function syncAppearanceCheckboxes() {
@@ -1652,7 +1687,7 @@ const SHORTCUT_ICONS = {
   settings:       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
   focus_input:    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   open_calendar:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
-  open_compare:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="8" height="18" rx="1"/><rect x="14" y="3" width="8" height="18" rx="1"/></svg>',
+  open_compare:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg>',
   open_cookbook:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
   open_research:  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>',
   open_gallery:   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
@@ -1710,6 +1745,10 @@ function _formatKeyCaps(combo) {
 }
 
 function _comboFromEvent(e) {
+  // Drop a stray AltGr keystroke (e.g. AltGr+E to type €) so it isn't recorded
+  // as a bogus ctrl+alt+<char> binding — onKey ignores empty combos. See
+  // platform.js for the macOS carve-out and Windows trade-off.
+  if (isAltGrEvent(e)) return '';
   const parts = [];
   if (e.ctrlKey || e.metaKey) parts.push('ctrl');
   if (e.altKey) parts.push('alt');
@@ -1776,7 +1815,9 @@ async function initShortcuts() {
             <span class="shortcut-hint" hidden></span>
             <button class="shortcut-key${combo ? '' : ' shortcut-key-unset'}" data-action="${action}" title="Click to rebind">${keyContent}</button>
             <button class="shortcut-action-btn ${isCustom ? 'is-reset' : ''}" data-action="${action}" title="${isCustom ? 'Reset to default' : 'Confirm'}" style="${isCustom ? '' : 'visibility:hidden'}">
-              ${isCustom ? '\u21A9' : '\u2713'}
+              ${isCustom
+                ? '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>'
+                : '\u2713'}
             </button>
           </div>
         `;
@@ -1848,7 +1889,7 @@ async function initShortcuts() {
         btn.innerHTML = _formatKeyCaps(keybinds[action]);
         const isCustom = keybinds[action] !== SHORTCUT_DEFAULTS[action];
         if (isCustom) {
-          actionBtn.textContent = '\u21A9';
+          actionBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
           actionBtn.classList.add('is-reset');
           actionBtn.title = 'Reset to default';
         } else {
@@ -1887,11 +1928,7 @@ async function initShortcuts() {
 
   async function saveKeybinds() {
     try {
-      await fetch('/api/auth/settings', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keybinds }),
-      });
+      await _postSettings({ keybinds });
       // Update global keybinds so they take effect immediately
       window._odysseusKeybinds = keybinds;
       if (uiModule && uiModule.showToast) uiModule.showToast('Shortcut saved');
@@ -1931,6 +1968,16 @@ function initAccount() {
       }
     }).catch(() => {});
 
+  // Update password placeholder and policy from server
+  fetch('/api/auth/policy', { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : null)
+    .then(policy => {
+      if (!policy) return;
+      _authPolicy = policy;
+      const pwNew = el('settings-pw-new');
+      if (pwNew) pwNew.placeholder = `New password (min ${policy.password_min_length})`;
+    }).catch(() => {});
+
   // Change password
   const saveBtn = el('settings-pw-save');
   const msgEl = el('settings-pw-msg');
@@ -1941,7 +1988,7 @@ function initAccount() {
       const conf = el('settings-pw-confirm').value;
       msgEl.style.color = '';
       if (!cur || !nw) { msgEl.textContent = 'Fill in all fields'; msgEl.style.color = 'var(--red)'; return; }
-      if (nw.length < 8) { msgEl.textContent = 'Min 8 characters'; msgEl.style.color = 'var(--red)'; return; }
+      if (nw.length < _authPolicy.password_min_length) { msgEl.textContent = `Min ${_authPolicy.password_min_length} characters`; msgEl.style.color = 'var(--red)'; return; }
       if (nw !== conf) { msgEl.textContent = 'Passwords don\'t match'; msgEl.style.color = 'var(--red)'; return; }
       saveBtn.disabled = true;
       try {
@@ -2012,15 +2059,16 @@ function initAccount() {
               const r = await fetch('/api/auth/2fa/setup', { method: 'POST', credentials: 'same-origin' });
               if (!r.ok) { const d = await r.json(); throw new Error(d.detail || 'Failed'); }
               const setup = await r.json();
+              const qrCode = safeRasterDataUrl(setup.qr_code);
               // Show QR code + manual secret + verify input
               tfaContent.innerHTML = `
                 <div style="text-align:center;margin-bottom:12px;">
-                  <img src="${setup.qr_code}" alt="QR Code" style="border-radius:8px;max-width:200px;">
+                  ${qrCode ? `<img src="${esc(qrCode)}" alt="QR Code" style="border-radius:8px;max-width:200px;">` : ''}
                 </div>
                 <div style="font-size:11px;opacity:0.5;text-align:center;margin-bottom:8px;">
                   Scan with your authenticator app, or enter manually:
                 </div>
-                <div style="font-family:monospace;font-size:12px;text-align:center;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;margin-bottom:12px;word-break:break-all;user-select:all;cursor:text;">${setup.secret}</div>
+                <div style="font-family:monospace;font-size:12px;text-align:center;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;margin-bottom:12px;word-break:break-all;user-select:all;cursor:text;">${esc(setup.secret)}</div>
                 <input id="tfa-verify-code" type="text" placeholder="Enter 6-digit code to verify" autocomplete="one-time-code" inputmode="numeric" maxlength="8" style="width:100%;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;font-size:13px;box-sizing:border-box;text-align:center;letter-spacing:3px;margin-bottom:6px;">
                 <div class="settings-row" style="justify-content:flex-end;">
                   <span id="tfa-msg" style="font-size:11px;margin-right:auto;"></span>
@@ -2092,9 +2140,39 @@ function initAccount() {
 
 function initAll() {
   modalEl = el('settings-modal');
-  initTabs();
-  initDrag();
-  initClose();
+
+  bindSettingsNavigation(modalEl, {
+    openAdminTab: openAdminSettingsTab,
+    onPanelActivated: onSettingsPanelActivated,
+  });
+
+  bindSettingsSearch(modalEl, {
+    isAdmin: () => !!window._isAdmin,
+    openPanel(tab) {
+      const button = modalEl.querySelector(`[data-settings-tab="${tab}"]`);
+      if (button) button.click();
+    },
+  });
+
+  bindSettingsSidebar(modalEl);
+
+  const registryIssues = getSettingsRegistryIssues(modalEl);
+  if (registryIssues.length) {
+    console.warn('Settings registry/DOM mismatch:', registryIssues);
+  }
+
+  bindSettingsDrag(modalEl);
+
+  bindSettingsClose(modalEl, {
+    closeSettings: close,
+    isTouchInsideModal: () => uiModule.isTouchInsideModal(),
+  });
+
+  bindOpenPromptModalLink({
+    getModal: () => modalEl,
+    closeSettings: close,
+  });
+
   initOpacityToggle();
   initialized = true;
   initDefaultChat();
@@ -2143,11 +2221,7 @@ async function initReminderSettings() {
       pubDebounce = setTimeout(async () => {
         try {
           const val = pubUrlIn.value.trim().replace(/\/+$/, '');
-          await fetch('/api/auth/settings', {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ app_public_url: val }),
-          });
+          await _postSettings({ app_public_url: val });
           if (pubUrlMsg) {
             pubUrlMsg.textContent = val ? 'Saved' : 'Cleared (deep-links disabled)';
             pubUrlMsg.style.color = 'var(--green,#50fa7b)';
@@ -2163,6 +2237,7 @@ async function initReminderSettings() {
   const channelSel = el('set-reminder-channel');
   const emailOpt = el('set-reminder-channel-email-opt');
   const ntfyOpt = el('set-reminder-channel-ntfy-opt');
+  const webhookOpt = el('set-reminder-channel-webhook-opt');
   const hint = el('set-reminder-channel-hint');
   const llmToggle = el('set-reminder-llm-toggle');
   // "Integrations" link in the channel-hint copy. Jumps to the
@@ -2185,11 +2260,16 @@ async function initReminderSettings() {
   // what the Integrations panel manages. Treat the email channel as
   // configured if there's at least one account with SMTP set.
   let emailAccounts = [];
+  const smtpAccountReady = (account) => !!(
+    account.smtp_host
+    && account.smtp_user
+    && (account.has_smtp_password || account.oauth_provider === 'google')
+  );
   try {
     const res = await fetch('/api/email/accounts', { credentials: 'same-origin' });
     if (res.ok) {
       const d = await res.json();
-      emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
+      emailAccounts = (d.accounts || []).filter(smtpAccountReady);
     }
   } catch (_) {}
   let smtpConfigured = emailAccounts.length > 0;
@@ -2225,12 +2305,33 @@ async function initReminderSettings() {
     ntfyOpt.textContent = 'ntfy (add in Integrations first)';
   }
 
+  // Webhook: available whenever at least one integration with a base_url exists.
+  // The user picks which integration to target and supplies a payload template.
+  let allIntegrations = [];
+  let webhookConfigured = false;
+  try {
+    const res = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
+    if (res.ok) {
+      const data = await res.json();
+      allIntegrations = (data.integrations || []).filter(i => i.base_url && i.enabled !== false);
+      webhookConfigured = allIntegrations.length > 0;
+    }
+  } catch (_) {}
+  if (!webhookConfigured && webhookOpt) {
+    webhookOpt.disabled = true;
+    webhookOpt.textContent = 'Webhook (add an Integration first)';
+  }
+
   const emailFromRow = el('set-reminder-email-from-row');
   const emailAcctSel = el('set-reminder-email-account');
   const emailToRow = el('set-reminder-email-to-row');
   const emailToIn = el('set-reminder-email-to');
   const ntfyTopicRow = el('set-reminder-ntfy-topic-row');
   const ntfyTopicIn = el('set-reminder-ntfy-topic');
+  const webhookIntgRow = el('set-reminder-webhook-intg-row');
+  const webhookIntgSel = el('set-reminder-webhook-intg');
+  const webhookTemplateRow = el('set-reminder-webhook-template-row');
+  const webhookTemplateIn = el('set-reminder-webhook-template');
 
   function populateReminderEmailAccounts(selectedId = '') {
     if (!emailAcctSel) return;
@@ -2239,6 +2340,14 @@ async function initReminderSettings() {
     ).join('');
     const fallback = (emailAccounts.find(a => a.is_default) || emailAccounts[0] || {}).id || '';
     emailAcctSel.value = (selectedId && emailAccounts.some(a => a.id === selectedId)) ? selectedId : fallback;
+  }
+
+  function populateWebhookIntegrations(selectedId = '') {
+    if (!webhookIntgSel) return;
+    webhookIntgSel.innerHTML = allIntegrations.length
+      ? allIntegrations.map(i => `<option value="${esc(i.id)}">${esc(i.name || i.id)}</option>`).join('')
+      : '<option value="">No integrations configured</option>';
+    if (selectedId && allIntegrations.some(i => i.id === selectedId)) webhookIntgSel.value = selectedId;
   }
 
   function applyReminderChannelAvailability() {
@@ -2250,16 +2359,21 @@ async function initReminderSettings() {
       ntfyOpt.disabled = !ntfyConfigured;
       ntfyOpt.textContent = ntfyConfigured ? 'ntfy' : 'ntfy (add in Integrations first)';
     }
+    if (webhookOpt) {
+      webhookOpt.disabled = !webhookConfigured;
+      webhookOpt.textContent = webhookConfigured ? 'Webhook' : 'Webhook (add an Integration first)';
+    }
   }
 
   async function refreshReminderChannelAvailability() {
     const currentChannel = channelSel.value || 'browser';
     const currentEmailAccount = emailAcctSel?.value || '';
+    const currentWebhookIntg = webhookIntgSel?.value || '';
     try {
       const res = await fetch('/api/email/accounts', { credentials: 'same-origin' });
       if (res.ok) {
         const d = await res.json();
-        emailAccounts = (d.accounts || []).filter(a => a.smtp_host && a.smtp_user && a.has_smtp_password);
+        emailAccounts = (d.accounts || []).filter(smtpAccountReady);
       }
     } catch (_) {}
     smtpConfigured = emailAccounts.length > 0;
@@ -2272,6 +2386,8 @@ async function initReminderSettings() {
         ntfyConfigured = (data.integrations || []).some(
           i => (i.preset === 'ntfy' || (i.name || '').toLowerCase() === 'ntfy') && i.enabled !== false && i.base_url
         );
+        allIntegrations = (data.integrations || []).filter(i => i.base_url && i.enabled !== false);
+        webhookConfigured = allIntegrations.length > 0;
       }
     } catch (_) {}
     if (!ntfyConfigured) {
@@ -2284,8 +2400,10 @@ async function initReminderSettings() {
 
     applyReminderChannelAvailability();
     populateReminderEmailAccounts(currentEmailAccount);
+    populateWebhookIntegrations(currentWebhookIntg);
     if (currentChannel === 'email' && !smtpConfigured) channelSel.value = 'browser';
     else if (currentChannel === 'ntfy' && !ntfyConfigured) channelSel.value = 'browser';
+    else if (currentChannel === 'webhook' && !webhookConfigured) channelSel.value = 'browser';
     else channelSel.value = currentChannel;
     if (hint) hint.textContent = CHANNEL_HINTS[channelSel.value] || '';
     syncChannelRows();
@@ -2296,9 +2414,12 @@ async function initReminderSettings() {
 
   function syncChannelRows() {
     const isEmail = channelSel.value === 'email';
+    const isWebhook = channelSel.value === 'webhook';
     if (emailFromRow) emailFromRow.style.display = (isEmail && emailAccounts.length > 1) ? 'flex' : 'none';
     if (emailToRow) emailToRow.style.display = isEmail ? 'flex' : 'none';
     if (ntfyTopicRow) ntfyTopicRow.style.display = channelSel.value === 'ntfy' ? 'flex' : 'none';
+    if (webhookIntgRow) webhookIntgRow.style.display = isWebhook ? 'flex' : 'none';
+    if (webhookTemplateRow) webhookTemplateRow.style.display = isWebhook ? 'flex' : 'none';
   }
 
   // Browser notifications fire on EVERY reminder (see
@@ -2307,8 +2428,9 @@ async function initReminderSettings() {
   // users don't think they have to choose between channels.
   const CHANNEL_HINTS = {
     browser: 'Reminders appear as browser notifications inside Odysseus.',
-    email: 'Reminders are emailed AND shown as a browser notification.',
+    email: 'Reminders are emailed and shown as a browser notification.',
     ntfy: 'Reminders are pushed via ntfy AND shown as a browser notification.',
+    webhook: 'Reminders are POSTed to the selected integration AND shown as a browser notification. Use {{title}} and {{message}} in the payload template.',
   };
 
   applyReminderChannelAvailability();
@@ -2319,16 +2441,68 @@ async function initReminderSettings() {
     });
   }
 
+  // Default payload templates for known presets — auto-filled when the user
+  // picks a matching integration so they don't have to write JSON from scratch.
+  // Defined here (before the load block) so both the load path and the change
+  // handler can reference it.
+  const WEBHOOK_PRESET_TEMPLATES = {
+    discord_webhook: '{"embeds": [{"title": "{{title}}", "description": "{{message}}", "color": 5793266}]}',
+  };
+
   try {
     const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     const s = await res.json();
     let savedChannel = s.reminder_channel || 'browser';
     if (savedChannel === 'email' && !smtpConfigured) savedChannel = 'browser';
     if (savedChannel === 'ntfy' && !ntfyConfigured) savedChannel = 'browser';
+    if (savedChannel === 'webhook' && !webhookConfigured) savedChannel = 'browser';
     channelSel.value = savedChannel;
     llmToggle.checked = !!s.reminder_llm_synthesis;
+    // Persona dropdown — populate from built-in PROMPT_TEMPLATES (characters)
+    // plus any custom character preset. Selected value persists to
+    // reminder_llm_persona (backend hook lives in src/notes.py once
+    // /api/notes/fire-reminder lands).
+    const personaSel = el('set-reminder-llm-persona');
+    if (personaSel) {
+      try {
+        const presetsMod = await import('./presets.js');
+        const tpl = presetsMod.PROMPT_TEMPLATES || [];
+        const chars = tpl.filter(t => t.isCharacter);
+        for (const c of chars) {
+          const opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = c.name;
+          personaSel.appendChild(opt);
+        }
+        // Custom character (single-slot preset)
+        try {
+          const all = (presetsMod.getAllPresets && presetsMod.getAllPresets()) || {};
+          if (all.custom && all.custom.character_name) {
+            const opt = document.createElement('option');
+            opt.value = 'custom';
+            opt.textContent = all.custom.character_name + ' (custom)';
+            personaSel.appendChild(opt);
+          }
+        } catch (_) {}
+      } catch (_) {}
+      personaSel.value = s.reminder_llm_persona || '';
+      personaSel.addEventListener('change', () => {
+        save({ reminder_llm_persona: personaSel.value });
+      });
+    }
     if (emailToIn) emailToIn.value = s.reminder_email_to || '';
     if (ntfyTopicIn) ntfyTopicIn.value = s.reminder_ntfy_topic || 'Reminders';
+    populateWebhookIntegrations(s.reminder_webhook_integration_id || '');
+    if (webhookTemplateIn) {
+      webhookTemplateIn.value = s.reminder_webhook_payload_template || '';
+      // If an integration is already selected but no template was ever saved,
+      // auto-fill with the preset default so the first test works out of the box.
+      if (!webhookTemplateIn.value && webhookIntgSel?.value) {
+        const intg = allIntegrations.find(i => i.id === webhookIntgSel.value);
+        const tpl = WEBHOOK_PRESET_TEMPLATES[intg?.preset] || '';
+        if (tpl) { webhookTemplateIn.value = tpl; save({ reminder_webhook_payload_template: tpl }); }
+      }
+    }
     // Restore the previously-picked email account (if any), otherwise
     // default to the account flagged is_default in the integrations
     // list. Falls through to the first option if neither exists.
@@ -2345,12 +2519,7 @@ async function initReminderSettings() {
 
   async function save(patch) {
     try {
-      await fetch('/api/auth/settings', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
+      await _postSettings(patch);
     } catch (e) { console.warn('Failed to save reminder settings', e); }
   }
 
@@ -2358,6 +2527,9 @@ async function initReminderSettings() {
     if (hint) hint.textContent = CHANNEL_HINTS[channelSel.value] || '';
     syncChannelRows();
     save({ reminder_channel: channelSel.value });
+    // Email reminder bell visibility tracks this — broadcast so the
+    // email library can re-evaluate without waiting for a re-open.
+    try { window.dispatchEvent(new CustomEvent('odysseus-reminder-channel-changed', { detail: { channel: channelSel.value } })); } catch (_) {}
   });
   if (emailToIn) {
     let emailDebounce;
@@ -2378,6 +2550,28 @@ async function initReminderSettings() {
       topicDebounce = setTimeout(() => save({ reminder_ntfy_topic: ntfyTopicIn.value.trim() || 'reminders' }), 600);
     });
   }
+  if (webhookIntgSel) {
+    webhookIntgSel.addEventListener('change', () => {
+      save({ reminder_webhook_integration_id: webhookIntgSel.value || '' });
+      // If the template is empty and we recognise the integration's preset,
+      // pre-fill with a sensible default so users can test immediately.
+      if (webhookTemplateIn && !webhookTemplateIn.value.trim()) {
+        const intg = allIntegrations.find(i => i.id === webhookIntgSel.value);
+        const tpl = WEBHOOK_PRESET_TEMPLATES[intg?.preset] || '';
+        if (tpl) {
+          webhookTemplateIn.value = tpl;
+          save({ reminder_webhook_payload_template: tpl });
+        }
+      }
+    });
+  }
+  if (webhookTemplateIn) {
+    let templateDebounce;
+    webhookTemplateIn.addEventListener('input', () => {
+      clearTimeout(templateDebounce);
+      templateDebounce = setTimeout(() => save({ reminder_webhook_payload_template: webhookTemplateIn.value.trim() }), 600);
+    });
+  }
   // Dim the whole AI Synthesis card when off (matches Vision/Utility/etc.).
   function syncSynthesisDim() {
     const card = llmToggle.closest('.admin-card');
@@ -2395,8 +2589,8 @@ async function initReminderSettings() {
   if (testBtn) {
     testBtn.addEventListener('click', async () => {
       testBtn.disabled = true;
-      if (testMsg) { testMsg.textContent = 'Sending…'; testMsg.style.color = 'var(--fg)'; }
-      // Whirlpool loader right next to the "Sending…" text while it sends.
+      if (testMsg) { testMsg.textContent = 'Sending'; testMsg.style.color = 'var(--fg)'; }
+      // Whirlpool loader right next to the "Sending" text while it sends.
       let _testSpin = null;
       try {
         const _sp = (await import('./spinner.js')).default;
@@ -2406,6 +2600,9 @@ async function initReminderSettings() {
       } catch (_) {}
       const _stopTestSpin = () => { try { _testSpin && _testSpin.stop(); _testSpin && _testSpin.element.remove(); } catch (_) {} };
       try {
+        // Persona picker is in a different scope (Reminders init), look it up
+        // by id so we can pass whatever is currently selected on screen.
+        const personaSel = el('set-reminder-llm-persona');
         const res = await fetch('/api/notes/fire-reminder', {
           method: 'POST',
           credentials: 'same-origin',
@@ -2414,6 +2611,16 @@ async function initReminderSettings() {
             note_id: 'test-' + Date.now(),
             title: 'Test Reminder',
             body: 'This is a test reminder to verify your settings are working.',
+            channel: channelSel.value,
+            // Mirror the in-UI AI Synthesis toggle + persona so the test never
+            // races a pending save and lets the user preview changes before
+            // hitting Save.
+            llm_synthesis: !!(llmToggle && llmToggle.checked),
+            llm_persona: (personaSel && personaSel.value) || '',
+            ...(channelSel.value === 'webhook' ? {
+              webhook_integration_id: webhookIntgSel?.value || '',
+              webhook_payload_template: webhookTemplateIn?.value.trim() || '',
+            } : {}),
           }),
         });
         const data = await res.json();
@@ -2424,10 +2631,15 @@ async function initReminderSettings() {
         if (channelSel.value === 'ntfy' && !data.ntfy_sent) {
           throw new Error(data.ntfy_error || 'ntfy reminder was not sent');
         }
+        if (channelSel.value === 'webhook' && !data.webhook_sent) {
+          const activeChannel = data.channel ? ` (server used channel: "${data.channel}")` : '';
+          throw new Error((data.webhook_error || 'Webhook reminder was not sent') + activeChannel);
+        }
         let status = 'Delivered via ' + channelSel.value;
         if (data.synthesis) status += ' (AI: "' + data.synthesis.slice(0, 60) + '...")';
         if (data.email_sent) status += ' — email sent';
         if (data.ntfy_sent) status += ' — ntfy sent';
+        if (data.webhook_sent) status += ' — webhook sent';
         if (testMsg) { testMsg.textContent = status; testMsg.style.color = 'var(--green, #50fa7b)'; }
         // Also fire a browser notification so user can see it
         if ('Notification' in window && Notification.permission === 'granted') {
@@ -2452,6 +2664,17 @@ async function initReminderSettings() {
 async function initEmailAccountsSettings() {
   const root = el('settings-modal');
   if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
+
+  el('set-email-open-library-settings')?.addEventListener('click', async () => {
+    try {
+      const mod = await import('./emailLibrary.js?v=20260815approvalsave1');
+      if (typeof mod.openEmailLibrarySettings === 'function') {
+        await mod.openEmailLibrarySettings();
+      }
+    } catch (e) {
+      console.warn('Failed to open Email settings page', e);
+    }
+  });
   const manageBtn = el('set-email-open-integrations');
   if (manageBtn && manageBtn.dataset.bound !== '1') {
     manageBtn.dataset.bound = '1';
@@ -2464,7 +2687,7 @@ async function initEmailAccountsSettings() {
       try {
         const mod = await import('./tasks.js');
         const openTasks = mod.openTasks || (mod.default && mod.default.openTasks);
-        if (typeof openTasks === 'function') openTasks();
+        if (typeof openTasks === 'function') openTasks(null, { filter: 'Email' });
         else document.getElementById('tool-tasks-btn')?.click();
       } catch (_) {
         document.getElementById('tool-tasks-btn')?.click();
@@ -2544,35 +2767,45 @@ async function initEmailAccountsSettings() {
     // IMAP and SMTP. Dovecot is IMAP-only here; the host is intentionally
     // blank because it may live on another machine (DNS, LAN, Tailscale).
     const PROVIDERS = {
-      gmail:    { label: 'Gmail',                  imap: { host: 'imap.gmail.com',           port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',            port: 465 } },
-      migadu:   { label: 'Migadu',                 imap: { host: 'imap.migadu.com',          port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',           port: 465 } },
-      icloud:   { label: 'iCloud',                 imap: { host: 'imap.mail.me.com',         port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',          port: 587 } },
-      outlook:  { label: 'Outlook / Office 365',   imap: { host: 'outlook.office365.com',    port: 993, starttls: false }, smtp: { host: 'smtp.office365.com',        port: 587 } },
-      fastmail: { label: 'Fastmail',               imap: { host: 'imap.fastmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.fastmail.com',         port: 465 } },
-      yahoo:    { label: 'Yahoo',                  imap: { host: 'imap.mail.yahoo.com',      port: 993, starttls: false }, smtp: { host: 'smtp.mail.yahoo.com',       port: 465 } },
-      dovecot:  { label: 'Dovecot IMAP (no SMTP)',  imap: { host: '',                        port: 31143, starttls: false }, smtp: { host: '',                          port: 465 } },
+      gmail:             { label: 'Gmail',                       imap: { host: 'imap.gmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',        port: 465 } },
+      google_workspace:  { label: 'Google Workspace / .edu',   imap: { host: 'imap.gmail.com',        port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',        port: 587 }, oauth: 'google' },
+      migadu:            { label: 'Migadu',                     imap: { host: 'imap.migadu.com',       port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',       port: 465 } },
+      icloud:            { label: 'iCloud',                     imap: { host: 'imap.mail.me.com',      port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',      port: 587 } },
+      outlook:           { label: 'Outlook / Office 365',       imap: { host: 'outlook.office365.com', port: 993, starttls: false }, smtp: { host: 'smtp.office365.com',    port: 587 } },
+      fastmail:          { label: 'Fastmail',                   imap: { host: 'imap.fastmail.com',     port: 993, starttls: false }, smtp: { host: 'smtp.fastmail.com',     port: 465 } },
+      yahoo:             { label: 'Yahoo',                      imap: { host: 'imap.mail.yahoo.com',   port: 993, starttls: false }, smtp: { host: 'smtp.mail.yahoo.com',   port: 465 } },
+      dovecot:           { label: 'Dovecot IMAP (no SMTP)',     imap: { host: '',                      port: 31143, starttls: false }, smtp: { host: '',                     port: 465 } },
     };
     const _providerOptions = Object.entries(PROVIDERS)
       .map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`)
       .join('');
+    const _smtpSecurity = (acct) => acct?.smtp_security || ((parseInt(acct?.smtp_port || 465) === 587) ? 'starttls' : 'ssl');
     formEl.innerHTML = `
       <h3 style="font-size:12px;margin:0 0 8px">${isEdit ? 'Edit Account' : 'New Account'}</h3>
       <div class="settings-col">
         <div class="settings-row"><label class="settings-label">Provider${_hint('Pick a known provider to auto-fill the IMAP and SMTP host/port. Choose Custom to type your own.')}</label><select id="eaf-provider" class="settings-select"><option value="">Custom…</option>${_providerOptions}</select></div>
+        <div id="eaf-provider-note" style="display:none;font-size:11px;line-height:1.5;padding:8px 10px;margin:2px 0 4px;border:1px solid color-mix(in srgb, var(--fg) 15%, transparent);border-left:3px solid var(--accent, var(--red));border-radius:4px;background:color-mix(in srgb, var(--fg) 4%, transparent);"></div>
         <div class="settings-row"><label class="settings-label">Name${_hint('Optional label for this account (e.g. “Work” or “Personal”). Leave blank to use the email address.')}</label><input id="eaf-name" class="settings-input" placeholder="(optional — leave blank to use email)" value="${esc(a.name || '')}"></div>
         <div class="settings-row"><label class="settings-label">Email${_hint('Your email address. Used as the From: header on outgoing mail and as the display label when Name is blank.')}</label><input id="eaf-from" class="settings-input" placeholder="you@example.com" value="${esc(a.from_address || '')}"></div>
+        <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="eaf-display-name" class="settings-input" placeholder="Your Name" value="${esc(a.display_name || '')}"></div>
+        <div id="eaf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
+          <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
+          <div id="eaf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${a.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
+          <button type="button" id="eaf-oauth-btn" class="admin-btn-add" style="font-size:11px">${a.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
+        </div>
         <div style="font-size:11px;font-weight:600;opacity:0.6;margin:6px 0 2px">IMAP (Receiving)</div>
         <div class="settings-row"><label class="settings-label">Host${_hint('Your IMAP server, e.g. imap.gmail.com, imap.migadu.com, a LAN host, or a Tailscale IP for Dovecot.')}</label><input id="eaf-imap-host" class="settings-input" value="${esc(a.imap_host || '')}"></div>
         <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="eaf-imap-port" class="settings-input" type="number" value="${esc(a.imap_port || 993)}" style="max-width:100px"></div>
         <div class="settings-row"><label class="settings-label">Username${_hint('Usually your full email address.')}</label><input id="eaf-imap-user" class="settings-input" value="${esc(a.imap_user || '')}"></div>
-        <div class="settings-row"><label class="settings-label">Password${_hint('Your IMAP login password. Use an app-specific password if your provider requires 2FA (Gmail, iCloud, etc.).')}</label><input id="eaf-imap-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_imap_password ? '(unchanged)' : ''}"></div>
+        <div class="eaf-password-section"><div class="settings-row"><label class="settings-label">Password${_hint('Your IMAP login password. Use an app-specific password if your provider requires 2FA. Outlook / Office 365 generally requires OAuth and will not work with a normal password here.')}</label><input id="eaf-imap-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_imap_password ? '(unchanged)' : ''}"></div></div>
         <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch"><input type="checkbox" id="eaf-imap-starttls" ${a.imap_starttls !== false ? 'checked' : ''}><span class="admin-slider"></span></label></div>
         <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px">SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
         <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com, smtp.migadu.com. Leave blank to make this account read-only.')}</label><input id="eaf-smtp-host" class="settings-input" value="${esc(a.smtp_host || '')}"></div>
         <div class="settings-row"><label class="settings-label">Port${_hint('465 for SSL/SMTPS, 587 for STARTTLS. 25 is usually blocked by ISPs.')}</label><input id="eaf-smtp-port" class="settings-input" type="number" value="${esc(a.smtp_port || 465)}" style="max-width:100px"></div>
+        <div class="settings-row"><label class="settings-label">Security${_hint('SSL for port 465, STARTTLS for port 587, or None for local SMTP bridges such as Proton Mail Bridge.')}</label><select id="eaf-smtp-security" class="settings-select"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></div>
         <div class="settings-row"><label class="settings-label">Same as IMAP${_hint('Use the IMAP username and password for SMTP too (this is right for almost every provider). Turn off to enter separate SMTP credentials.')}</label><label class="admin-switch"><input type="checkbox" id="eaf-smtp-same" ${(!isEdit || (a.smtp_user && a.imap_user && a.smtp_user === a.imap_user)) ? 'checked' : ''}><span class="admin-slider"></span></label></div>
         <div class="settings-row eaf-smtp-creds"><label class="settings-label">Username${_hint('Usually the same as your IMAP username (your email address).')}</label><input id="eaf-smtp-user" class="settings-input" value="${esc(a.smtp_user || '')}"></div>
-        <div class="settings-row eaf-smtp-creds"><label class="settings-label">Password${_hint('Your SMTP password — often the same as your IMAP password.')}</label><input id="eaf-smtp-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_smtp_password ? '(unchanged)' : ''}"></div>
+        <div class="settings-row eaf-smtp-creds"><label class="settings-label">Password${_hint('Your SMTP password — often the same as your IMAP password. Outlook / Office 365 generally requires OAuth and will not work with a normal password here.')}</label><input id="eaf-smtp-pass" class="settings-input" type="password" placeholder="${isEdit && a.has_smtp_password ? '(unchanged)' : ''}"></div>
         <div class="settings-row" style="margin-top:10px;align-items:center;">
           <button class="admin-btn-add" id="eaf-save" style="background:var(--red);border-color:var(--red);color:#fff;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
@@ -2587,16 +2820,79 @@ async function initEmailAccountsSettings() {
       </div>
     `;
 
+    // Show/hide OAuth section and password fields based on provider selection.
+    function _syncOauthUI(providerKey) {
+      const p = PROVIDERS[providerKey];
+      const isOauth = !!(p && p.oauth);
+      el('eaf-oauth-section').style.display = isOauth ? '' : 'none';
+      formEl.querySelectorAll('.eaf-password-section').forEach(r => {
+        r.style.display = isOauth ? 'none' : '';
+      });
+    }
+
+    const eafProviderNotes = {
+      outlook: {
+        title: 'Outlook / Office 365 needs OAuth',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+      },
+    };
+    const eafNoteEl = el('eaf-provider-note');
+    const _renderEafProviderNote = (key) => {
+      const n = eafProviderNotes[key];
+      if (!eafNoteEl || !n) {
+        if (eafNoteEl) {
+          eafNoteEl.style.display = 'none';
+          eafNoteEl.innerHTML = '';
+        }
+        return;
+      }
+      eafNoteEl.style.display = '';
+      eafNoteEl.innerHTML = `<div style="font-weight:600;margin-bottom:3px;">${esc(n.title)}</div><div style="opacity:0.8;">${esc(n.body)}</div>`;
+    };
+
     // Provider preset → autofill host/port/STARTTLS for both halves.
     el('eaf-provider').addEventListener('change', (e) => {
+      _renderEafProviderNote(e.target.value);
       const p = PROVIDERS[e.target.value];
-      if (!p) return;
+      if (!p) { _syncOauthUI(''); return; }
       el('eaf-imap-host').value = p.imap.host;
       el('eaf-imap-port').value = p.imap.port;
       el('eaf-imap-starttls').checked = !!p.imap.starttls;
       el('eaf-smtp-host').value = p.smtp.host;
       el('eaf-smtp-port').value = p.smtp.port;
+      el('eaf-smtp-security').value = p.smtp.security || ((parseInt(p.smtp.port || 465) === 587) ? 'starttls' : 'ssl');
+      _syncOauthUI(e.target.value);
     });
+
+    // Init OAuth UI for accounts already connected via OAuth.
+    if (a.oauth_provider === 'google') _syncOauthUI('google_workspace');
+
+    // "Connect with Google" button — save the account first, then redirect to OAuth.
+    el('eaf-oauth-btn').addEventListener('click', async () => {
+      // Must save the account first to get an account_id to pass to the OAuth flow.
+      const body = {
+        name: el('eaf-name').value.trim() || el('eaf-from').value.trim(),
+        from_address: el('eaf-from').value.trim(),
+        display_name: el('eaf-display-name').value.trim(),
+        imap_host: el('eaf-imap-host').value.trim(),
+        imap_port: parseInt(el('eaf-imap-port').value) || 993,
+        imap_user: el('eaf-imap-user').value.trim(),
+        imap_starttls: el('eaf-imap-starttls').checked,
+        smtp_host: el('eaf-smtp-host').value.trim(),
+        smtp_port: parseInt(el('eaf-smtp-port').value) || 587,
+        smtp_security: el('eaf-smtp-security').value,
+        smtp_user: el('eaf-imap-user').value.trim(),
+      };
+      if (!body.name) { el('eaf-msg').textContent = 'Enter a Name or Email first'; el('eaf-msg').style.color = 'var(--red)'; return; }
+      const url = isEdit ? `/api/email/accounts/${a.id}` : '/api/email/accounts';
+      const method = isEdit ? 'PUT' : 'POST';
+      const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!d.ok) { el('eaf-msg').textContent = d.error || 'Save failed'; el('eaf-msg').style.color = 'var(--red)'; return; }
+      const accId = isEdit ? a.id : d.id;
+      window.location.href = `/api/email/oauth/google/authorize?account_id=${encodeURIComponent(accId)}`;
+    });
+    el('eaf-smtp-security').value = _smtpSecurity(a);
 
     // "Same as IMAP" toggle — hide the SMTP creds rows when on. The save
     // handler copies the IMAP user/password into SMTP at submit time.
@@ -2614,12 +2910,14 @@ async function initEmailAccountsSettings() {
       const body = {
         name: el('eaf-name').value.trim(),
         from_address: el('eaf-from').value.trim(),
+        display_name: el('eaf-display-name').value.trim(),
         imap_host: el('eaf-imap-host').value.trim(),
         imap_port: parseInt(el('eaf-imap-port').value) || 993,
         imap_user: el('eaf-imap-user').value.trim(),
         imap_starttls: el('eaf-imap-starttls').checked,
         smtp_host: el('eaf-smtp-host').value.trim(),
         smtp_port: parseInt(el('eaf-smtp-port').value) || 465,
+        smtp_security: el('eaf-smtp-security').value,
         smtp_user: el('eaf-smtp-user').value.trim(),
       };
       if (el('eaf-imap-pass').value) body.imap_password = el('eaf-imap-pass').value;
@@ -2669,6 +2967,35 @@ async function initEmailSettings() {
   const root = el('settings-modal');
   if (!root || !root.querySelector('[data-settings-panel="email"]')) return;
 
+  const styleKey = () => {
+    const account = String(window.__odysseusActiveEmailAccount || '').trim();
+    return account ? `odysseus-email-writing-style:${account}` : 'odysseus-email-writing-style';
+  };
+  const styleEl = el('set-email-style');
+  const emailAccountSuffix = () => {
+    const account = String(window.__odysseusActiveEmailAccount || '').trim();
+    return account ? `?account_id=${encodeURIComponent(account)}` : '';
+  };
+
+  // The account/CardDAV config endpoints can be slow when remote mail servers
+  // are cold. Populate the Writing Style box independently so saved prose does
+  // not appear seconds after the panel opens.
+  try {
+    const cachedStyle = localStorage.getItem(styleKey());
+    if (styleEl && cachedStyle !== null && !styleEl.value) styleEl.value = cachedStyle;
+  } catch (_) {}
+
+  const loadWritingStyle = async () => {
+    try {
+      const res = await fetch(`/api/email/style${emailAccountSuffix()}`);
+      const data = await res.json();
+      const style = data.style || '';
+      if (styleEl) styleEl.value = style;
+      try { localStorage.setItem(styleKey(), style); } catch (_) {}
+    } catch (_) {}
+  };
+  loadWritingStyle();
+
   // Load current email config
   try {
     const res = await fetch('/api/email/config');
@@ -2691,13 +3018,6 @@ async function initEmailSettings() {
     if (el('set-carddav-url')) el('set-carddav-url').value = cfg.url || '';
     if (el('set-carddav-user')) el('set-carddav-user').value = cfg.username || '';
     if (el('set-carddav-pass')) el('set-carddav-pass').value = '';
-  } catch (_) {}
-
-  // Load writing style
-  try {
-    const res = await fetch('/api/email/style');
-    const data = await res.json();
-    if (el('set-email-style')) el('set-email-style').value = data.style || '';
   } catch (_) {}
 
   // Save email config
@@ -2783,14 +3103,15 @@ async function initEmailSettings() {
       }
     }
     try {
-      const res = await fetch('/api/email/extract-style', {
+      const res = await fetch(`/api/email/extract-style${emailAccountSuffix()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sample_count: 15 }),
       });
       const data = await res.json();
       if (data.success && data.style) {
-        if (el('set-email-style')) el('set-email-style').value = data.style;
+        if (styleEl) styleEl.value = data.style;
+        try { localStorage.setItem(styleKey(), data.style); } catch (_) {}
         if (msg) msg.textContent = '✓ Style extracted';
       } else {
         if (msg) msg.textContent = data.error || 'Failed';
@@ -2809,12 +3130,16 @@ async function initEmailSettings() {
     const msg = el('set-email-style-msg');
     if (msg) msg.textContent = 'Saving...';
     try {
-      const res = await fetch('/api/email/style', {
+      const style = styleEl ? styleEl.value : '';
+      const res = await fetch(`/api/email/style${emailAccountSuffix()}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ style: el('set-email-style').value }),
+        body: JSON.stringify({ style }),
       });
       const result = await res.json();
+      if (result.success) {
+        try { localStorage.setItem(styleKey(), style); } catch (_) {}
+      }
       if (msg) msg.textContent = result.success ? '✓ Saved' : 'Failed';
       setTimeout(() => { if (msg) msg.textContent = ''; }, 3000);
     } catch (e) {
@@ -2846,12 +3171,18 @@ async function initIntegrations() {
   let editingId = null;
   let presets = {};
 
-  // Toggle auth header row visibility
+  // Presets where the secret is embedded in the URL — no separate key or
+  // auth header is used, so hiding those fields avoids confusion.
+  const URL_AUTH_PRESETS = ['discord_webhook'];
+
+  // Toggle auth header + key row visibility based on auth type and preset.
   function syncAuthRow() {
     const v = authTypeSel.value;
     authHeaderRow.style.display = (v === 'header' || v === 'query') ? 'flex' : 'none';
     if (v === 'query') authHeaderIn.placeholder = 'api_key';
     else authHeaderIn.placeholder = 'X-Auth-Token';
+    const keyRow = keyIn?.closest('.settings-row');
+    if (keyRow) keyRow.style.display = URL_AUTH_PRESETS.includes(presetSel?.value) ? 'none' : '';
   }
   authTypeSel.addEventListener('change', syncAuthRow);
 
@@ -3031,7 +3362,67 @@ const INTG_TYPES = {
   carddav: { label: 'CardDAV', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' },
   email:   { label: 'Email',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>' },
   mcp:     { label: 'MCP',     icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>' },
+  codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 10.696.453a6.023 6.023 0 0 0-5.75 4.172 6.061 6.061 0 0 0-3.946 2.945 6.024 6.024 0 0 0 .742 7.099 5.98 5.98 0 0 0 .516 4.911 6.046 6.046 0 0 0 6.51 2.9A5.996 5.996 0 0 0 13.26 23.547a6.023 6.023 0 0 0 5.75-4.172 6.061 6.061 0 0 0 3.946-2.945 6.024 6.024 0 0 0-.674-6.609zM13.26 21.047a4.508 4.508 0 0 1-2.886-1.041l.143-.082 4.793-2.769a.777.777 0 0 0 .391-.676V10.34l2.026 1.17a.072.072 0 0 1 .039.061v5.596a4.532 4.532 0 0 1-4.506 4.48zM3.968 17.64a4.473 4.473 0 0 1-.537-3.018l.143.086 4.793 2.769a.79.79 0 0 0 .782 0l5.852-3.379v2.34a.072.072 0 0 1-.029.062l-4.845 2.796a4.532 4.532 0 0 1-6.159-1.656zM2.804 7.922a4.49 4.49 0 0 1 2.348-1.973V11.6a.778.778 0 0 0 .391.676l5.852 3.378-2.026 1.17a.072.072 0 0 1-.068 0L4.456 14.03a4.532 4.532 0 0 1-1.652-6.108zm16.423 3.823L13.375 8.367l2.026-1.17a.072.072 0 0 1 .068 0l4.845 2.796a4.525 4.525 0 0 1-.7 8.08V12.42a.778.778 0 0 0-.387-.676zm2.015-3.025l-.143-.086-4.793-2.769a.79.79 0 0 0-.782 0L9.672 9.243V6.903a.072.072 0 0 1 .029-.062l4.845-2.796a4.525 4.525 0 0 1 6.696 4.675zM8.598 12.66L6.57 11.49a.072.072 0 0 1-.039-.061V5.833a4.525 4.525 0 0 1 7.413-3.48l-.143.082-4.793 2.769a.777.777 0 0 0-.391.676l-.019 6.78zm1.1-2.379l2.607-1.505 2.607 1.505v3.01l-2.607 1.505-2.607-1.505z"/></svg>' },
+  claude:  { label: 'Claude',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>' },
   vault:   { label: 'Vault',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' },
+};
+
+// Config shared by the Codex Agent and Claude Agent forms. Both use the same
+// scope-gated /api/codex/* backend; this just parameterizes the UI label,
+// default token name, and the per-agent install commands.
+const AGENT_CONFIGS = {
+  codex: {
+    label: 'Codex Agent',
+    word: 'Codex',
+    namePrefix: 'codex agent',
+    defaultName: 'Codex Agent',
+    pluginPath: '/api/codex/plugin.zip',
+    setupDescription: 'Downloads a plugin bundle and registers it.',
+    buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
+export ODYSSEUS_API_TOKEN='${token}'
+mkdir -p ~/plugins
+curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/codex/plugin.zip" -o /tmp/odysseus-codex-plugin.zip
+python3 -m zipfile -e /tmp/odysseus-codex-plugin.zip ~/plugins
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+p = Path.home() / ".agents" / "plugins" / "marketplace.json"
+p.parent.mkdir(parents=True, exist_ok=True)
+if p.exists():
+    data = json.loads(p.read_text())
+else:
+    data = {"name": "personal", "interface": {"displayName": "Personal"}, "plugins": []}
+
+data.setdefault("name", "personal")
+data.setdefault("interface", {}).setdefault("displayName", "Personal")
+plugins = data.setdefault("plugins", [])
+entry = {
+    "name": "odysseus",
+    "source": {"source": "local", "path": "./plugins/odysseus"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Productivity",
+}
+data["plugins"] = [item for item in plugins if item.get("name") != "odysseus"] + [entry]
+p.write_text(json.dumps(data, indent=2) + "\\n")
+PY
+codex plugin add odysseus@personal
+python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`,
+  },
+  claude: {
+    label: 'Claude Agent',
+    word: 'Claude',
+    namePrefix: 'claude agent',
+    defaultName: 'Claude Agent',
+    pluginPath: '/api/claude/plugin.zip',
+    setupDescription: 'Downloads a plugin bundle and registers it.',
+    buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
+export ODYSSEUS_API_TOKEN='${token}'
+mkdir -p ~/.claude
+curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/claude/plugin.zip" -o /tmp/odysseus-claude-skill.zip
+python3 -m zipfile -e /tmp/odysseus-claude-skill.zip ~/.claude/
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py capabilities`,
+  },
 };
 
 let _unifiedInited = false;
@@ -3046,28 +3437,45 @@ async function initUnifiedIntegrations() {
   if (!listEl) return;
   let integrationNotice = '';
 
+  // Hide the "+ Add Integration" button whenever the per-type create form
+  // is open so it doesn't compete visually with the in-progress form.
+  // Many call sites toggle formEl.style.display directly; observe instead
+  // of patching every one of them.
+  if (formEl && addBtn && addBtn.parentElement && !formEl._addBtnObserved) {
+    formEl._addBtnObserved = true;
+    const addBtnWrap = addBtn.parentElement;
+    const _syncAddBtnWrap = () => {
+      const formOpen = formEl.style.display && formEl.style.display !== 'none';
+      addBtnWrap.style.display = formOpen ? 'none' : '';
+    };
+    new MutationObserver(_syncAddBtnWrap).observe(formEl, { attributes: true, attributeFilter: ['style'] });
+    _syncAddBtnWrap();
+  }
+
   function _openEmailSettings() {
     open('email');
   }
 
   async function fetchAll() {
-    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes] = await Promise.all([
+    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes, calendarsRes] = await Promise.all([
       fetch('/api/auth/integrations', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { integrations: [] }).catch(() => ({ integrations: [] })),
-      fetch('/api/calendar/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
+      fetch('/api/calendar/config/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
       fetch('/api/contacts/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch('/api/contacts/list', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { contacts: [], count: 0 }).catch(() => ({ contacts: [], count: 0 })),
       fetch('/api/email/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
       fetch('/api/mcp/servers', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/vault/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
+      fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
+      fetch('/api/calendar/calendars', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { calendars: [] }).catch(() => ({ calendars: [] })),
     ]);
     const items = [];
     // API integrations
     for (const intg of (apiRes.integrations || [])) {
       items.push({ type: 'api', id: intg.id, name: intg.name || 'Unnamed', detail: intg.base_url || '', enabled: intg.enabled !== false, data: intg });
     }
-    // CalDAV
-    if (calRes.url) {
-      items.push({ type: 'caldav', id: '__caldav__', name: 'Calendar (CalDAV)', detail: calRes.url, enabled: true, data: calRes });
+    // CalDAV — one card per account
+    for (const acc of (calRes.accounts || [])) {
+      items.push({ type: 'caldav', id: acc.id, name: acc.label || 'Calendar (CalDAV)', detail: acc.url, enabled: true, data: acc });
     }
     // Contacts import first, then the optional CardDAV sync account.
     const contactCount = Number(contactsRes.count || (contactsRes.contacts || []).length || 0);
@@ -3103,6 +3511,20 @@ async function initUnifiedIntegrations() {
       const statusText = srv.needs_oauth ? 'needs auth' : srv.status === 'connected' ? `${srv.enabled_tool_count}/${srv.tool_count} tools` : srv.status === 'error' ? 'error' : 'disconnected';
       items.push({ type: 'mcp', id: srv.id || srv.name, name: srv.name || 'MCP Server', detail: statusText, enabled: srv.is_enabled !== false, data: srv });
     }
+    for (const tok of (Array.isArray(tokenRes) ? tokenRes : [])) {
+      const scopes = tok.scopes || [];
+      const lowerName = (tok.name || '').toLowerCase();
+      let agentType = null;
+      if (lowerName.startsWith('claude agent')) agentType = 'claude';
+      else if (lowerName.startsWith('codex agent')) agentType = 'codex';
+      else if (scopes.some(s => String(s || '').startsWith('todos:') || String(s || '').startsWith('email:') || String(s || '').startsWith('documents:'))) {
+        // Legacy / un-prefixed scoped tokens fall back to Codex for backwards compat.
+        agentType = 'codex';
+      }
+      if (!agentType) continue;
+      const detail = `${tok.token_prefix || 'token'}... - ${scopes.join(', ') || 'chat'}`;
+      items.push({ type: agentType, id: tok.id, name: tok.name || (agentType === 'claude' ? 'Claude Agent' : 'Codex Agent'), detail, enabled: true, data: tok });
+    }
     // Vaultwarden removed as an integration option.
     return items;
   }
@@ -3113,16 +3535,16 @@ async function initUnifiedIntegrations() {
     // type gets. (The clickable glow-on-test variant for email was
     // removed earlier; this matches the API/CalDAV/MCP pattern.)
     const statusDot = item.enabled
-      ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--green,#50fa7b);flex-shrink:0" title="Active"></span>'
+      ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-success,#50fa7b);flex-shrink:0;--notif-glow:var(--color-success,#50fa7b);animation:cookbook-notif-pulse 2s ease-in-out infinite;" title="Active"></span>'
       : '<span style="width:8px;height:8px;border-radius:50%;background:var(--fg);opacity:0.3;flex-shrink:0" title="Disabled"></span>';
-    return `<div class="intg-card" data-intg-id="${item.id}" data-intg-type="${item.type}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px;cursor:pointer" title="Click to edit">
-      <span style="opacity:0.6;flex-shrink:0">${t.icon}</span>
+    return `<div class="intg-card" data-intg-id="${item.id}" data-intg-type="${item.type}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;cursor:pointer;transition:all 0.15s;" title="Click to edit">
+      <span style="color:var(--accent, var(--red));flex-shrink:0">${t.icon}</span>
       <div style="flex:1;min-width:0">
         <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px">${item.name} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${t.label}</span></div>
         <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.detail || ''}</div>
       </div>
       ${statusDot}
-      <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
+      <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" data-intg-name="${(item.name || '').replace(/"/g, '&quot;')}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>
     </div>`;
@@ -3150,9 +3572,11 @@ async function initUnifiedIntegrations() {
         if (e.target.closest('.intg-del-btn')) return;
         const type = card.dataset.intgType;
         const id = card.dataset.intgId;
-        const items2 = listEl.querySelectorAll('.intg-card');
-        items2.forEach(c => c.style.borderColor = '');
-        card.style.borderColor = 'var(--accent)';
+        // Toggle a class instead of mutating inline borderColor — the
+        // inline border shorthand made the reset unreliable, leaving
+        // stale accent borders on previously-clicked cards.
+        listEl.querySelectorAll('.intg-card.intg-card-active').forEach(c => c.classList.remove('intg-card-active'));
+        card.classList.add('intg-card-active');
         showForm(type, id);
       });
     });
@@ -3160,12 +3584,13 @@ async function initUnifiedIntegrations() {
     listEl.querySelectorAll('.intg-del-btn').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (!await window.styledConfirm('Remove this integration?', { confirmText: 'Remove', danger: true })) return;
+        const intgName = btn.dataset.intgName || 'this integration';
+        if (!await window.styledConfirm(`Remove "${intgName}"?`, { confirmText: 'Remove', danger: true })) return;
         const type = btn.dataset.intgType;
         const id = btn.dataset.intgId;
         try {
           if (type === 'api') await fetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'caldav') await fetch('/api/calendar/config', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: '', username: '', password: '' }) });
+          else if (type === 'caldav') await fetch(`/api/calendar/config/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'contacts') {
             await fetch('/api/contacts/clear', { method: 'DELETE', credentials: 'same-origin' });
           }
@@ -3174,6 +3599,7 @@ async function initUnifiedIntegrations() {
           }
           else if (type === 'email') await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'mcp') await fetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'codex' || type === 'claude') await fetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'vault') await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
         } catch (_) {}
         formEl.style.display = 'none';
@@ -3186,10 +3612,12 @@ async function initUnifiedIntegrations() {
   function showForm(type, editId) {
     formEl.style.display = '';
     if (type === 'api') showApiForm(editId);
-    else if (type === 'caldav') showCalDavForm();
+    else if (type === 'caldav') showCalDavForm(editId);
     else if (type === 'contacts' || type === 'carddav') showCardDavForm();
     else if (type === 'email') showEmailForm(editId);
     else if (type === 'mcp') showMcpForm(editId);
+    else if (type === 'codex') showAgentForm('codex', editId);
+    else if (type === 'claude') showAgentForm('claude', editId);
     else if (type === 'vault') showVaultForm();
   }
 
@@ -3214,24 +3642,104 @@ async function initUnifiedIntegrations() {
     // and they're patchy on mobile browsers. A native select renders
     // the same everywhere and makes the available options visible
     // without needing the user to type.
-    const selectOpts = presetEntries
-      .sort((a, b) => (a[1].name || a[0]).localeCompare(b[1].name || b[0]))
+    const sortedPresets = presetEntries.sort((a, b) => (a[1].name || a[0]).localeCompare(b[1].name || b[0]));
+    const selectOpts = sortedPresets
       .map(([k, p]) => `<option value="${k}">${esc(p.name || k)}</option>`)
       .join('');
+    // Letter-in-brand-color logo for each API preset; outline plug icon for
+    // "Custom (no preset)". Matches the email-provider dropdown pattern.
+    const _apiLetter = (letter, bg) => `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style="flex-shrink:0"><circle cx="12" cy="12" r="11" fill="${bg}"/><text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif">${letter}</text></svg>`;
+    const _apiCustomIco = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;opacity:0.7"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>';
+    const API_PRESET_LOGO = {
+      miniflux:        _apiLetter('M', '#214c87'),
+      gitea:           _apiLetter('G', '#609926'),
+      linkding:        _apiLetter('L', '#1f2937'),
+      home_assistant:  _apiLetter('H', '#41bdf5'),
+      ntfy:            _apiLetter('n', '#317f43'),
+      vaultwarden:     _apiLetter('V', '#175ddc'),
+      freshrss:        _apiLetter('R', '#ef6c00'),
+    };
+    const _apiIconFor = (k) => {
+      if (!k) return _apiCustomIco;
+      if (API_PRESET_LOGO[k]) return API_PRESET_LOGO[k];
+      const first = (presets[k]?.name || k).trim().charAt(0).toUpperCase() || '?';
+      return _apiLetter(first, '#6b7280');
+    };
+    const _apiRows = [['', 'Custom (no preset)'], ...sortedPresets.map(([k, p]) => [k, p.name || k])]
+      .map(([k, label]) => `<button type="button" class="ufapi-option" data-value="${esc(k)}" style="display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;">${_apiIconFor(k)}<span>${esc(label)}</span></button>`).join('');
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px">${editId ? 'Edit' : 'Add'} API Integration</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>API Integration</h2>
         <div class="settings-col">
-          <div class="settings-row"><label class="settings-label">Preset</label><select id="uf-api-preset" class="settings-select"><option value="">Custom (no preset)</option>${selectOpts}</select></div>
+          <div class="settings-row"><label class="settings-label">Preset</label>
+            <div style="position:relative;flex:1;min-width:0;">
+              <select id="uf-api-preset" tabindex="-1" aria-hidden="true" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;"><option value="">Custom (no preset)</option>${selectOpts}</select>
+              <button type="button" id="uf-api-preset-trigger" class="settings-select" style="display:flex;align-items:center;gap:10px;cursor:pointer;text-align:left;width:100%;padding-right:24px;position:relative;">
+                <span class="ufapi-icon" style="display:inline-flex;align-items:center;">${_apiCustomIco}</span>
+                <span class="ufapi-label" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Custom (no preset)</span>
+                <span aria-hidden="true" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);opacity:0.5;font-size:10px;pointer-events:none;">▾</span>
+              </button>
+              <div id="uf-api-preset-menu" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:1000;background:var(--panel);border:1px solid var(--border);border-radius:6px;max-height:340px;overflow-y:auto;box-shadow:0 6px 18px rgba(0,0,0,0.25);">${_apiRows}</div>
+            </div>
+          </div>
           <div class="settings-row"><label class="settings-label">Name</label><input id="uf-api-name" class="settings-input" placeholder="My Service"></div>
           <div class="settings-row"><label class="settings-label">Base URL</label><input id="uf-api-url" class="settings-input" placeholder="http://localhost:8080"></div>
           <div id="uf-api-ntfy-hint" style="display:none;font-size:11px;line-height:1.35;opacity:0.68;margin:-2px 0 2px 106px;"></div>
           <div class="settings-row"><label class="settings-label">Auth${_apiHint('How this service expects the credential to be sent. <b>Bearer</b> = sends "Authorization: Bearer YOUR_KEY" (most modern APIs, ntfy, OpenAI-style). <b>Header</b> = sends YOUR_KEY verbatim under a header name you choose (Miniflux uses X-Auth-Token). <b>Basic</b> = HTTP basic auth (user:pass). <b>None</b> = the API is open / no auth.')}</label><select id="uf-api-auth" class="settings-input"><option value="bearer">Bearer (most common)</option><option value="header">Header</option><option value="basic">Basic</option><option value="none">None</option></select></div>
           <div class="settings-row" id="uf-api-header-row"><label class="settings-label">Header${_apiHint('The HTTP header name the key goes under (Miniflux: X-Auth-Token; most others: Authorization). Only used when Auth = Header.')}</label><input id="uf-api-header" class="settings-input" placeholder="X-Auth-Token"></div>
           <div class="settings-row"><label class="settings-label">API Key${_apiHint('The secret token the service issued you (generated in its admin panel / settings). Used to prove your identity on each request. Required for any Auth mode except None.')}</label><input id="uf-api-key" class="settings-input" type="password" placeholder="Token/key"></div>
-          <div class="settings-row" style="margin-top:4px"><button class="admin-btn-sm" id="uf-api-save">Save</button><button class="admin-btn-sm" id="uf-api-test" style="opacity:0.7">Test</button><button class="admin-btn-sm" id="uf-api-cancel" style="opacity:0.7">Cancel</button><span id="uf-api-msg" style="font-size:11px"></span></div>
+          <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
+            <span id="uf-api-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
+            <button class="admin-btn-add" id="uf-api-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Test</button>
+            <button class="admin-btn-add" id="uf-api-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">Save</button>
+            <button class="admin-btn-add" id="uf-api-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Cancel</button>
+          </div>
         </div>
       </div>`;
+    // Custom preset dropdown wire-up (hidden select stays as data source).
+    (() => {
+      const trig = el('uf-api-preset-trigger');
+      const menu = el('uf-api-preset-menu');
+      const sel = el('uf-api-preset');
+      if (!trig || !menu || !sel) return;
+      const lbl = trig.querySelector('.ufapi-label');
+      const ico = trig.querySelector('.ufapi-icon');
+      const _setFromKey = (k) => {
+        const row = menu.querySelector(`.ufapi-option[data-value="${k}"]`);
+        const text = row?.querySelector('span')?.textContent || 'Custom (no preset)';
+        if (lbl) lbl.textContent = text;
+        if (ico) ico.innerHTML = _apiIconFor(k);
+      };
+      // Menu is reused (hidden, not recreated). close() hides it and tears down
+      // its outside-click listener + Escape-stack entry; bindMenuDismiss is
+      // re-registered fresh on each open (see _open).
+      let _close = () => { menu.style.display = 'none'; };
+      const _open = () => {
+        menu.style.display = 'block';
+        const tRect = trig.getBoundingClientRect();
+        const mRect = menu.getBoundingClientRect();
+        const below = window.innerHeight - tRect.bottom;
+        const above = tRect.top;
+        if (mRect.height > below && above > below) { menu.style.top = 'auto'; menu.style.bottom = 'calc(100% + 2px)'; }
+        else { menu.style.top = 'calc(100% + 2px)'; menu.style.bottom = 'auto'; }
+        _close = bindMenuDismiss(menu, () => { menu.style.display = 'none'; }, (ev) => !menu.contains(ev.target) && ev.target !== trig);
+      };
+      trig.addEventListener('click', (e) => { e.stopPropagation(); menu.style.display === 'block' ? _close() : _open(); });
+      menu.querySelectorAll('.ufapi-option').forEach(btn => {
+        btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
+        btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; });
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const k = btn.dataset.value || '';
+          sel.value = k;
+          _setFromKey(k);
+          _close();
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      });
+      _setFromKey(sel.value || '');
+    })();
+
     const preset = el('uf-api-preset'), name = el('uf-api-name'), url = el('uf-api-url'), auth = el('uf-api-auth'), header = el('uf-api-header'), key = el('uf-api-key'), ntfyHint = el('uf-api-ntfy-hint');
     let _editId = editId && editId !== 'new' ? editId : null;
     // Load existing
@@ -3248,6 +3756,7 @@ async function initUnifiedIntegrations() {
     const _applyPreset = () => {
       const p = presets[preset.value];
       const isNtfy = preset.value === 'ntfy' || (p && (p.name || '').toLowerCase() === 'ntfy');
+      const isUrlAuth = preset.value === 'discord_webhook'; // secret embedded in URL — no key/auth fields needed
       if (ntfyHint) {
         ntfyHint.style.display = isNtfy ? 'block' : 'none';
         if (isNtfy) {
@@ -3255,8 +3764,16 @@ async function initUnifiedIntegrations() {
         }
       }
       if (url) {
-        url.placeholder = isNtfy ? 'http://127.0.0.1:8091' : 'http://localhost:8080';
+        url.placeholder = isNtfy ? 'http://127.0.0.1:8091' : isUrlAuth ? 'https://discord.com/api/webhooks/...' : 'http://localhost:8080';
       }
+      // For presets that embed the secret in the URL, hide auth/key/header rows
+      // so users aren't confused into thinking they need to fill them in.
+      const keyRow = key?.closest('.settings-row');
+      const authRow = auth?.closest('.settings-row');
+      const headerRow = el('uf-api-header-row');
+      if (keyRow) keyRow.style.display = isUrlAuth ? 'none' : '';
+      if (authRow) authRow.style.display = isUrlAuth ? 'none' : '';
+      if (headerRow) headerRow.style.display = isUrlAuth ? 'none' : '';
       if (!p) return;
       name.value = p.name || '';
       auth.value = p.auth_type || 'none';
@@ -3267,7 +3784,11 @@ async function initUnifiedIntegrations() {
     el('uf-api-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
     el('uf-api-save').addEventListener('click', async () => {
       const presetKey = preset.value || undefined;
-      const body = { name: name.value, base_url: url.value, auth_type: auth.value, auth_header: header.value, preset: presetKey };
+      const nameValue = name.value.trim();
+      const urlValue = url.value.trim();
+      if (!nameValue) { el('uf-api-msg').textContent = 'Name required'; el('uf-api-msg').style.color = 'var(--red)'; return; }
+      if (!urlValue) { el('uf-api-msg').textContent = 'Base URL required'; el('uf-api-msg').style.color = 'var(--red)'; return; }
+      const body = { name: nameValue, base_url: urlValue, auth_type: auth.value, auth_header: header.value, preset: presetKey };
       if (key.value) body.api_key = key.value;
       try {
         const u = _editId ? `/api/auth/integrations/${_editId}` : '/api/auth/integrations';
@@ -3303,33 +3824,48 @@ async function initUnifiedIntegrations() {
     });
   }
 
-  // ── CalDAV form ──
-  async function showCalDavForm() {
+  // ── CalDAV form (supports add + edit per account) ──
+  async function showCalDavForm(editId) {
+    const isNew = !editId || editId === 'new';
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px">Calendar (CalDAV)</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>${isNew ? 'Add CalDAV Calendar' : 'Edit CalDAV Calendar'}</h2>
         <div class="settings-col">
-          <div class="settings-row"><label class="settings-label">Server URL</label><input id="uf-caldav-url" class="settings-input" placeholder="http://localhost:5232/user"></div>
-          <div class="settings-row"><label class="settings-label">Username</label><input id="uf-caldav-user" class="settings-input"></div>
-          <div class="settings-row"><label class="settings-label">Password</label><input id="uf-caldav-pass" class="settings-input" type="password"></div>
-          <div class="settings-row" style="margin-top:4px"><button class="admin-btn-sm" id="uf-caldav-save">Save</button><button class="admin-btn-sm" id="uf-caldav-test" style="opacity:0.7">Test</button><button class="admin-btn-sm" id="uf-caldav-cancel" style="opacity:0.7">Cancel</button><span id="uf-caldav-msg" style="font-size:11px"></span></div>
+          <div class="settings-row"><label class="settings-label">Label</label><input id="uf-caldav-label" class="settings-input" placeholder="e.g. Work, Personal"></div>
+          <div class="settings-row"><label class="settings-label">Server URL</label><input id="uf-caldav-url" class="settings-input" placeholder="https://www.google.com/calendar/dav/you@gmail.com/user/"></div>
+          <div class="settings-row"><label class="settings-label">Username</label><input id="uf-caldav-user" class="settings-input" placeholder="you@example.com"></div>
+          <div class="settings-row"><label class="settings-label">Password</label><input id="uf-caldav-pass" class="settings-input" type="password" placeholder="${isNew ? '' : 'Leave blank to keep existing'}"></div>
+          <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
+            <span id="uf-caldav-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
+            <button class="admin-btn-add" id="uf-caldav-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Test</button>
+            <button class="admin-btn-add" id="uf-caldav-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">Save</button>
+            <button class="admin-btn-add" id="uf-caldav-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Cancel</button>
+          </div>
         </div>
       </div>`;
-    try {
-      const r = await fetch('/api/calendar/config', { credentials: 'same-origin' }); const d = await r.json();
-      el('uf-caldav-url').value = d.url || ''; el('uf-caldav-user').value = d.username || '';
-    } catch (_) {}
+
+    if (!isNew) {
+      try {
+        const r = await fetch('/api/calendar/config/accounts', { credentials: 'same-origin' });
+        const d = await r.json();
+        const acc = (d.accounts || []).find(a => a.id === editId);
+        if (acc) {
+          el('uf-caldav-label').value = acc.label || '';
+          el('uf-caldav-url').value = acc.url || '';
+          el('uf-caldav-user').value = acc.username || '';
+        }
+      } catch (_) {}
+    }
+
     el('uf-caldav-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
 
-    // Run a PROPFIND with the form's current url+user+pass. Used by
-    // both the Test button (visible result only) and by Save (refuse
-    // to persist a broken config). Returns the parsed {ok, error?}.
     const _runCalDavTest = async () => {
       const body = {
         url: el('uf-caldav-url').value.trim(),
         username: el('uf-caldav-user').value.trim(),
         password: el('uf-caldav-pass').value,
       };
+      if (!isNew && !body.password) body.account_id = editId;
       try {
         const r = await fetch('/api/calendar/test', {
           method: 'POST', credentials: 'same-origin',
@@ -3341,6 +3877,7 @@ async function initUnifiedIntegrations() {
         return { ok: false, error: 'Network error: ' + e.message };
       }
     };
+
     const _setCalDavMsg = (text, ok) => {
       const msg = el('uf-caldav-msg');
       msg.textContent = text;
@@ -3348,10 +3885,6 @@ async function initUnifiedIntegrations() {
     };
 
     el('uf-caldav-save').addEventListener('click', async () => {
-      // Pre-validate by hitting the server with the same PROPFIND the
-      // Test button uses. If the CalDAV server rejects the creds/URL
-      // we won't persist garbage — the user gets the actual error
-      // (HTTP 401, "Not found", "Connection refused", etc.) in red.
       _setCalDavMsg('Testing…', true);
       el('uf-caldav-msg').style.color = '';
       const d = await _runCalDavTest();
@@ -3360,15 +3893,31 @@ async function initUnifiedIntegrations() {
         return;
       }
       try {
-        await fetch('/api/calendar/config', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: el('uf-caldav-url').value,
-            username: el('uf-caldav-user').value,
-            password: el('uf-caldav-pass').value,
-          }),
-        });
+        const payload = {
+          label: el('uf-caldav-label').value.trim(),
+          url: el('uf-caldav-url').value.trim(),
+          username: el('uf-caldav-user').value.trim(),
+          password: el('uf-caldav-pass').value,
+        };
+        let resp;
+        if (isNew) {
+          resp = await fetch('/api/calendar/config/accounts', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } else {
+          resp = await fetch(`/api/calendar/config/accounts/${editId}`, {
+            method: 'PUT', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        }
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          _setCalDavMsg(err.detail || 'Save failed', false);
+          return;
+        }
         _setCalDavMsg('Saved', true);
         formEl.style.display = 'none';
         await renderList();
@@ -3377,6 +3926,7 @@ async function initUnifiedIntegrations() {
         _setCalDavMsg('Save failed', false);
       }
     });
+
     el('uf-caldav-test').addEventListener('click', async () => {
       _setCalDavMsg('Testing…', true);
       el('uf-caldav-msg').style.color = '';
@@ -3389,33 +3939,51 @@ async function initUnifiedIntegrations() {
   async function showCardDavForm() {
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
-        <h2 style="font-size:13px">Contacts (CardDAV)</h2>
+        <h2 style="font-size:13px;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Contacts (CardDAV)</h2>
         <div class="settings-col">
           <div class="settings-row"><label class="settings-label">URL</label><input id="uf-carddav-url" class="settings-input" placeholder="http://localhost:5232/user/contacts/"></div>
           <div class="settings-row"><label class="settings-label">Username</label><input id="uf-carddav-user" class="settings-input"></div>
           <div class="settings-row"><label class="settings-label">Password</label><input id="uf-carddav-pass" class="settings-input" type="password"></div>
-          <div class="settings-row" style="margin-top:4px"><button class="admin-btn-sm" id="uf-carddav-save">Save</button><button class="admin-btn-sm" id="uf-carddav-cancel" style="opacity:0.7">Cancel</button><span id="uf-carddav-msg" style="font-size:11px"></span></div>
+          <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
+            <span id="uf-carddav-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
+            <button class="admin-btn-add" id="uf-carddav-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              Save
+            </button>
+            <button class="admin-btn-add" id="uf-carddav-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              Cancel
+            </button>
+          </div>
         </div>
       </div>
       <div class="admin-card contacts-manager" style="margin-top:8px">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-          <h2 style="font-size:13px;margin:0;">Contacts Import <span id="cm-count" style="opacity:0.5;font-weight:normal;font-size:11px;"></span></h2>
+          <h2 style="font-size:13px;margin:0;display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Contacts Import <span id="cm-count" style="opacity:0.5;font-weight:normal;font-size:11px;"></span></h2>
           <button class="admin-btn-sm" id="cm-import-btn" style="margin-left:auto;">Import</button>
           <button class="admin-btn-sm" id="cm-export-vcf-btn">Export .vcf</button>
           <button class="admin-btn-sm" id="cm-export-csv-btn">Export .csv</button>
           <button class="admin-btn-sm" id="cm-add-toggle">+ Add</button>
           <input type="file" id="cm-import-file" accept=".vcf,.csv,text/vcard,text/csv" multiple style="display:none">
         </div>
-        <div id="cm-add-row" class="contacts-add-row" style="display:none;">
-          <input id="cm-add-name" class="settings-input" placeholder="Name" style="flex:1;min-width:0;">
-          <input id="cm-add-email" class="settings-input" placeholder="email@example.com" style="flex:1;min-width:0;">
-          <button class="admin-btn-sm" id="cm-add-save">Save</button>
+        <div id="cm-add-row" class="contacts-add-row" style="display:none;flex-direction:column;gap:4px;">
+          <input id="cm-add-name" class="settings-input" placeholder="Name">
+          <input id="cm-add-email" class="settings-input" placeholder="email@example.com">
+          <input id="cm-add-phone" class="settings-input" placeholder="Phone (optional)">
+          <input id="cm-add-address" class="settings-input" placeholder="Address (optional)">
+          <div style="display:flex;gap:6px;justify-content:flex-end;"><button class="admin-btn-sm" id="cm-add-save">Save</button></div>
         </div>
+        <input type="text" id="cm-search" class="settings-input" placeholder="Search contacts (name, email, phone, address)" style="margin-top:6px;">
         <div id="cm-list" class="contacts-list"><div style="opacity:0.4;font-size:11px;padding:8px 2px;">Loading…</div></div>
       </div>`;
     try {
       const r = await fetch('/api/contacts/config', { credentials: 'same-origin' }); const d = await r.json();
       el('uf-carddav-url').value = d.url || ''; el('uf-carddav-user').value = d.username || '';
+      // Server masks the password as '***' when one is saved (or '' when
+      // none). Surface that state via the input's placeholder so users
+      // can tell their password is already on file without us echoing it.
+      const passInput = el('uf-carddav-pass');
+      if (passInput && d.password) passInput.placeholder = '(unchanged)';
     } catch (_) {}
     el('uf-carddav-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
     el('uf-carddav-save').addEventListener('click', async () => {
@@ -3446,11 +4014,18 @@ async function initUnifiedIntegrations() {
     el('cm-add-save')?.addEventListener('click', async () => {
       const name = el('cm-add-name').value.trim();
       const email = el('cm-add-email').value.trim();
-      if (!email) { el('cm-add-email').focus(); return; }
+      const phone = el('cm-add-phone')?.value.trim() || '';
+      const address = el('cm-add-address')?.value.trim() || '';
+      // Need at least a name or email; address-only entries without a
+      // name aren't useful as a contact.
+      if (!name && !email) { (name ? el('cm-add-email') : el('cm-add-name')).focus(); return; }
       try {
-        await fetch('/api/contacts/add', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email }) });
+        await fetch('/api/contacts/add', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, phone, address }) });
       } catch (_) {}
-      el('cm-add-name').value = ''; el('cm-add-email').value = '';
+      el('cm-add-name').value = '';
+      el('cm-add-email').value = '';
+      if (el('cm-add-phone')) el('cm-add-phone').value = '';
+      if (el('cm-add-address')) el('cm-add-address').value = '';
       el('cm-add-row').style.display = 'none';
       await _renderContactsManager();
     });
@@ -3549,27 +4124,66 @@ async function initUnifiedIntegrations() {
     }
     // Sort by name for a stable list.
     contacts.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-    list.innerHTML = contacts.map(c => {
-      const emails = (c.emails || []).join(', ');
-      const phones = (c.phones || []).join(', ');
-      const sub = [emails, phones].filter(Boolean).join(' · ');
-      return `<div class="contact-row" data-uid="${esc(c.uid)}">
-        <div class="contact-row-view" style="display:flex;align-items:center;gap:8px;">
-          <div style="flex:1;min-width:0;">
-            <div class="contact-name" style="font-size:12px;font-weight:600;">${esc(c.name || '(no name)')}</div>
-            <div class="contact-sub" style="font-size:10px;opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sub)}</div>
+
+    // Live filter — search across name/emails/phones/address.
+    const searchInput = el('cm-search');
+    const q = (searchInput?.value || '').trim().toLowerCase();
+    const filtered = !q ? contacts : contacts.filter(c => {
+      const hay = [
+        c.name || '',
+        (c.emails || []).join(' '),
+        (c.phones || []).join(' '),
+        c.address || '',
+      ].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+    if (cnt) cnt.textContent = contacts.length ? `(${filtered.length}/${contacts.length})` : '';
+
+    if (!filtered.length) {
+      list.innerHTML = `<div style="opacity:0.4;font-size:11px;padding:8px 2px;">${q ? 'No matches.' : 'No contacts yet.'}</div>`;
+    } else {
+      list.innerHTML = filtered.map(c => {
+        const emails = (c.emails || []).join(', ');
+        const phones = (c.phones || []).join(', ');
+        const address = c.address || '';
+        const sub = [emails, phones, address].filter(Boolean).join(' · ');
+        return `<div class="contact-row" data-uid="${esc(c.uid)}">
+          <div class="contact-row-view" style="display:flex;align-items:center;gap:8px;">
+            <div style="flex:1;min-width:0;">
+              <div class="contact-name" style="font-size:12px;font-weight:600;">${esc(c.name || '(no name)')}</div>
+              <div class="contact-sub" style="font-size:10px;opacity:0.55;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(sub)}</div>
+            </div>
+            <button class="admin-btn-sm contact-edit" title="Edit" style="display:inline-flex;align-items:center;gap:4px;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 35%, var(--border));">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              Edit
+            </button>
+            <button class="admin-btn-sm contact-del" title="Delete" style="opacity:0.85;display:inline-flex;align-items:center;gap:4px;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              Delete
+            </button>
           </div>
-          <button class="admin-btn-sm contact-edit" title="Edit">Edit</button>
-          <button class="admin-btn-sm contact-del" title="Delete" style="opacity:0.75;">Delete</button>
-        </div>
-        <div class="contact-row-edit" style="display:none;flex-direction:column;gap:4px;">
-          <input class="settings-input contact-edit-name" value="${esc(c.name || '')}" placeholder="Name">
-          <input class="settings-input contact-edit-emails" value="${esc(emails)}" placeholder="email1, email2">
-          <input class="settings-input contact-edit-phones" value="${esc(phones)}" placeholder="phone1, phone2">
-          <div style="display:flex;gap:6px;"><button class="admin-btn-sm contact-save">Save</button><button class="admin-btn-sm contact-cancel" style="opacity:0.7;">Cancel</button></div>
-        </div>
-      </div>`;
-    }).join('');
+          <div class="contact-row-edit" style="display:none;flex-direction:column;gap:4px;">
+            <input class="settings-input contact-edit-name" value="${esc(c.name || '')}" placeholder="Name">
+            <input class="settings-input contact-edit-emails" value="${esc(emails)}" placeholder="email1, email2">
+            <input class="settings-input contact-edit-phones" value="${esc(phones)}" placeholder="phone1, phone2">
+            <input class="settings-input contact-edit-address" value="${esc(address)}" placeholder="Address">
+            <div style="display:flex;gap:6px;"><button class="admin-btn-sm contact-save">Save</button><button class="admin-btn-sm contact-cancel" style="opacity:0.7;">Cancel</button></div>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    // Wire the search input — debounced so we don't refetch on every key.
+    if (searchInput && !searchInput._wired) {
+      searchInput._wired = true;
+      let _t;
+      searchInput.addEventListener('input', () => {
+        clearTimeout(_t);
+        _t = setTimeout(() => _renderContactsManager(), 80);
+      });
+    }
+    // Stash latest contacts so the search input doesn't have to refetch.
+    list._lastContacts = contacts;
     // Wire each row's edit / delete / save / cancel.
     list.querySelectorAll('.contact-row').forEach(row => {
       const uid = row.dataset.uid;
@@ -3588,6 +4202,7 @@ async function initUnifiedIntegrations() {
           name: row.querySelector('.contact-edit-name').value.trim(),
           emails: row.querySelector('.contact-edit-emails').value.split(',').map(s => s.trim()).filter(Boolean),
           phones: row.querySelector('.contact-edit-phones').value.split(',').map(s => s.trim()).filter(Boolean),
+          address: row.querySelector('.contact-edit-address')?.value.trim() || '',
         };
         try {
           await fetch('/api/contacts/' + encodeURIComponent(uid), { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -3633,6 +4248,7 @@ async function initUnifiedIntegrations() {
     // it may be remote (DNS, LAN, Tailscale), not localhost.
     const PROVIDERS = {
       gmail:    { label: 'Gmail',                   emailEx: 'you@gmail.com',     imap: { host: 'imap.gmail.com',           port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com',     port: 465 } },
+      google_workspace: { label: 'Google Workspace / .edu', emailEx: 'you@yourschool.edu', imap: { host: 'imap.gmail.com', port: 993, starttls: false }, smtp: { host: 'smtp.gmail.com', port: 587 }, oauth: 'google' },
       migadu:   { label: 'Migadu',                  emailEx: 'you@yourdomain.com', imap: { host: 'imap.migadu.com',          port: 993, starttls: false }, smtp: { host: 'smtp.migadu.com',    port: 465 } },
       icloud:   { label: 'iCloud',                  emailEx: 'you@icloud.com',    imap: { host: 'imap.mail.me.com',         port: 993, starttls: false }, smtp: { host: 'smtp.mail.me.com',   port: 587 } },
       outlook:  { label: 'Outlook / Office 365',    emailEx: 'you@outlook.com',   imap: { host: 'outlook.office365.com',    port: 993, starttls: false }, smtp: { host: 'smtp.office365.com', port: 587 } },
@@ -3642,42 +4258,78 @@ async function initUnifiedIntegrations() {
     };
     const _providerOptions = Object.entries(PROVIDERS)
       .map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
+    // Provider logos — small SVGs the custom dropdown renders next to each
+    // option. Letter-in-brand-color circle for known providers; outline
+    // envelope for "Custom…". Inline SVG (no external assets, no emoji).
+    const _letterLogo = (letter, bg) => `<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" style="flex-shrink:0"><circle cx="12" cy="12" r="11" fill="${bg}"/><text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif">${letter}</text></svg>`;
+    const _customLogo = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0;opacity:0.7"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>';
+    const PROV_LOGO = {
+      '':       _customLogo,
+      gmail:    _letterLogo('G', '#ea4335'),
+      google_workspace: _letterLogo('G', '#ea4335'),
+      migadu:   _letterLogo('M', '#3aa39d'),
+      icloud:   _letterLogo('i', '#3693f3'),
+      outlook:  _letterLogo('O', '#0078d4'),
+      fastmail: _letterLogo('F', '#4a5fbb'),
+      yahoo:    _letterLogo('Y', '#6001d2'),
+      dovecot:  _letterLogo('D', '#6b7280'),
+    };
+    const _provOptionRows = [['', 'Custom…'], ...Object.entries(PROVIDERS).map(([k, v]) => [k, v.label])]
+      .map(([k, label]) => `<button type="button" class="ufp-option" data-value="${esc(k)}" style="display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;">${PROV_LOGO[k] || _customLogo}<span>${esc(label)}</span></button>`).join('');
+    const _smtpSecurity = (acct) => acct?.smtp_security || ((parseInt(acct?.smtp_port || 465) === 587) ? 'starttls' : 'ssl');
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
         <h2 style="font-size:13px">${isEdit ? 'Edit' : 'Add'} Email Account</h2>
         <div class="settings-col">
-          <div class="settings-row"><label class="settings-label">Provider${_hint('Pick a known provider to auto-fill the IMAP and SMTP host/port. Choose Custom to type your own.')}</label><select id="uf-email-provider" class="settings-select"><option value="">Custom…</option>${_providerOptions}</select></div>
+          <div class="settings-row"><label class="settings-label">Provider${_hint('Pick a known provider to auto-fill the IMAP and SMTP host/port. Choose Custom to type your own.')}</label>
+            <div class="ufp-wrap" style="position:relative;flex:1;min-width:0;">
+              <select id="uf-email-provider" tabindex="-1" aria-hidden="true" style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;"><option value="">Custom…</option>${_providerOptions}</select>
+              <button type="button" id="uf-email-provider-trigger" class="settings-select" style="display:flex;align-items:center;gap:8px;cursor:pointer;text-align:left;width:100%;padding-right:24px;position:relative;">
+                <span class="ufp-icon" style="display:inline-flex;align-items:center;">${PROV_LOGO['']}</span>
+                <span class="ufp-label" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Custom…</span>
+                <span aria-hidden="true" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);opacity:0.5;font-size:10px;pointer-events:none;">▾</span>
+              </button>
+              <div id="uf-email-provider-menu" style="display:none;position:absolute;top:calc(100% + 2px);left:0;right:0;z-index:1000;background:var(--panel);border:1px solid var(--border);border-radius:6px;max-height:280px;overflow-y:auto;box-shadow:0 6px 18px rgba(0,0,0,0.25);">${_provOptionRows}</div>
+            </div>
+          </div>
           <div id="uf-email-provider-note" style="display:none;font-size:11px;line-height:1.5;padding:8px 10px;margin:2px 0 4px;border:1px solid color-mix(in srgb, var(--fg) 15%, transparent);border-left:3px solid var(--accent, var(--red));border-radius:4px;background:color-mix(in srgb, var(--fg) 4%, transparent);"></div>
           <div class="settings-row"><label class="settings-label">Name${_hint('Optional label for this account (e.g. “Work” or “Personal”). Leave blank to use the email address.')}</label><input id="uf-email-name" class="settings-input" placeholder="(optional — leave blank to use email)"></div>
           <div class="settings-row"><label class="settings-label">Email${_hint('Your email address. Used as the From: header on outgoing mail and as the display label when Name is blank.')}</label><input id="uf-email-from" class="settings-input" placeholder="you@example.com"></div>
-          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:4px 0 2px">IMAP (Receiving)</div>
+          <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="uf-display-name" class="settings-input" placeholder="Your Name"></div>
+          <div id="uf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
+            <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
+            <div id="uf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${existing && existing.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
+            <button type="button" id="uf-oauth-btn" class="admin-btn-add" style="font-size:11px">${existing && existing.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
+          </div>
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:4px 0 2px;display:flex;align-items:center;gap:5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>IMAP (Receiving)</div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your IMAP server, e.g. imap.gmail.com, imap.migadu.com, a LAN host, or a Tailscale IP for Dovecot.')}</label><input id="uf-imap-host" class="settings-input" placeholder="imap.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('993 for IMAPS (most providers), 143 for plain or STARTTLS. Local servers often use a custom port like 31143.')}</label><input id="uf-imap-port" class="settings-input" type="number" placeholder="993" style="max-width:100px"></div>
           <div class="settings-row"><label class="settings-label">Username${_hint('Yes — your full email address goes here too (e.g. you@gmail.com). Same as the Email field above for almost every provider.')}</label><input id="uf-imap-user" class="settings-input" placeholder="you@example.com"></div>
-          <div class="settings-row"><label class="settings-label">Password${_hint('For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password — those are blocked for IMAP). For Migadu, Fastmail, Outlook, etc.: your regular mailbox password works.')}</label><input id="uf-imap-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div>
+          <div class="uf-password-section"><div class="settings-row"><label class="settings-label">Password${_hint('For Gmail, iCloud, and Yahoo: paste your App Password (NOT your normal account password). For Migadu and Fastmail, your mailbox password usually works. Outlook / Office 365 generally requires OAuth and will not work with this password form.')}</label><input id="uf-imap-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div></div>
           <div class="settings-row"><label class="settings-label">STARTTLS${_hint('Turn ON for port 143/587 to upgrade plain to TLS. Turn OFF for port 993 (IMAPS — already encrypted) or a local server with no TLS configured.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-imap-starttls" checked><span class="admin-slider"></span></label></div>
-          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px">SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
+          <div style="font-size:11px;font-weight:600;opacity:0.6;margin:8px 0 2px;display:flex;align-items:center;gap:5px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent, var(--red));flex-shrink:0;" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>SMTP (Sending) <span style="font-weight:normal;opacity:0.7">— optional, leave blank for read-only</span></div>
           <div class="settings-row"><label class="settings-label">Host${_hint('Your outgoing-mail server, e.g. smtp.gmail.com. Leave blank to make this account read-only.')}</label><input id="uf-smtp-host" class="settings-input" placeholder="smtp.example.com"></div>
           <div class="settings-row"><label class="settings-label">Port${_hint('465 for SSL/SMTPS, 587 for STARTTLS. 25 is usually blocked by ISPs.')}</label><input id="uf-smtp-port" class="settings-input" type="number" placeholder="465" style="max-width:100px"></div>
+          <div class="settings-row"><label class="settings-label">Security${_hint('SSL for port 465, STARTTLS for port 587, or None for local SMTP bridges such as Proton Mail Bridge.')}</label><select id="uf-smtp-security" class="settings-select"><option value="ssl">SSL</option><option value="starttls">STARTTLS</option><option value="none">None</option></select></div>
           <div class="settings-row"><label class="settings-label">Same as IMAP${_hint('Use the IMAP username and password for SMTP too (right for almost every provider). Turn off to enter separate SMTP credentials.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-smtp-same" checked><span class="admin-slider"></span></label></div>
           <div class="settings-row uf-smtp-creds"><label class="settings-label">Username${_hint('Usually the same as your IMAP username (your email address).')}</label><input id="uf-smtp-user" class="settings-input"></div>
-          <div class="settings-row uf-smtp-creds"><label class="settings-label">Password${_hint('Your SMTP password — often the same as your IMAP password.')}</label><input id="uf-smtp-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div>
+          <div class="settings-row uf-smtp-creds"><label class="settings-label">Password${_hint('Your SMTP password — often the same as your IMAP password. Outlook / Office 365 generally requires OAuth and will not work with this password form.')}</label><input id="uf-smtp-pass" class="settings-input" type="password" placeholder="${placeholderPass}"></div>
           <div class="settings-row" style="margin-top:4px"><label class="settings-label">Default${_hint('Use this account whenever no specific account is chosen.')}</label><label class="admin-switch" style="margin-left:0"><input type="checkbox" id="uf-email-default"><span class="admin-slider"></span></label><span style="font-size:10px;opacity:0.5;margin-left:6px">Used when nothing else is selected</span></div>
-          <div class="settings-row" style="margin-top:10px;align-items:center;">
-            <button class="admin-btn-add" id="uf-email-save" style="background:var(--red);border-color:var(--red);color:#fff;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
-              <span class="uf-email-save-ico" style="display:inline-flex;width:11px;height:11px;align-items:center;justify-content:center;">
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-              </span>
-              <span class="uf-email-save-label">${isEdit ? 'Save' : 'Create'}</span>
-            </button>
-            <button class="admin-btn-add" id="uf-email-test" style="display:inline-flex;align-items:center;gap:5px;opacity:0.85;">
+          <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
+            <span id="uf-email-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
+            <button class="admin-btn-add" id="uf-email-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
               <span class="uf-email-test-ico" style="display:inline-flex;width:11px;height:11px;align-items:center;justify-content:center;">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 4 12 14.01 9 11.01"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
               </span>
               Test
             </button>
-            <span id="uf-email-msg" style="font-size:11px;flex:1;margin-left:8px"></span>
-            <button class="admin-btn-add" id="uf-email-cancel" style="opacity:0.7;display:inline-flex;align-items:center;gap:5px;position:relative;top:1px;margin-left:auto;">
+            <button class="admin-btn-add" id="uf-email-save" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
+              <span class="uf-email-save-ico" style="display:inline-flex;width:11px;height:11px;align-items:center;justify-content:center;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              </span>
+              <span class="uf-email-save-label">${isEdit ? 'Save' : 'Create'}</span>
+            </button>
+            <button class="admin-btn-add" id="uf-email-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
               Cancel
             </button>
@@ -3705,6 +4357,12 @@ async function initUnifiedIntegrations() {
         title: 'Yahoo needs an App Password',
         body: 'Generate an App Password from Yahoo Account Security (requires 2-Step Verification enabled) and paste it as the Password.',
         url: 'https://login.yahoo.com/account/security/app-passwords',
+      },
+      outlook: {
+        title: 'Outlook / Office 365 needs OAuth',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        url: 'https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/disable-basic-authentication-in-exchange-online',
+        linkLabel: 'Read Microsoft note',
       },
     };
     const noteEl = el('uf-email-provider-note');
@@ -3763,7 +4421,7 @@ async function initUnifiedIntegrations() {
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
           <a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer" class="admin-btn-sm" style="background:var(--red);border-color:var(--red);color:#fff;text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-weight:600;">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-            Generate App Password
+            ${esc(n.linkLabel || 'Generate App Password')}
           </a>
           <button type="button" class="admin-btn-sm uf-prov-copy" data-url="${esc(n.url)}" style="opacity:0.7;display:inline-flex;align-items:center;gap:5px;">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -3772,12 +4430,75 @@ async function initUnifiedIntegrations() {
         </div>`;
     };
 
+    // Show/hide the OAuth section and password fields based on provider selection.
+    function _syncOauthUI(providerKey) {
+      const p = PROVIDERS[providerKey];
+      const isOauth = !!(p && p.oauth);
+      el('uf-oauth-section').style.display = isOauth ? '' : 'none';
+      formEl.querySelectorAll('.uf-password-section').forEach(r => {
+        r.style.display = isOauth ? 'none' : '';
+      });
+    }
+
+    // Custom dropdown wire-up — the native <select> stays in the DOM as the
+    // data source and accessibility target, but the visible UI is a button +
+    // popup so each provider row can render with its SVG logo. Selecting an
+    // option updates select.value and dispatches a `change` event so the
+    // existing autofill handler below runs unchanged.
+    (() => {
+      const trigger = el('uf-email-provider-trigger');
+      const menu = el('uf-email-provider-menu');
+      const sel = el('uf-email-provider');
+      if (!trigger || !menu || !sel) return;
+      const labelEl = trigger.querySelector('.ufp-label');
+      const iconEl = trigger.querySelector('.ufp-icon');
+      const _setFromKey = (k) => {
+        const row = menu.querySelector(`.ufp-option[data-value="${k}"]`);
+        const lbl = row?.querySelector('span')?.textContent || 'Custom…';
+        if (labelEl) labelEl.textContent = lbl;
+        if (iconEl) iconEl.innerHTML = PROV_LOGO[k] || _customLogo;
+      };
+      // Menu is reused (hidden, not recreated). _closeMenu hides it and tears
+      // down its outside-click listener + Escape-stack entry; bindMenuDismiss is
+      // re-registered fresh on each open (see _openMenu).
+      let _closeMenu = () => { menu.style.display = 'none'; };
+      const _openMenu = () => {
+        menu.style.display = 'block';
+        // Drop-up when there's not enough room below the trigger.
+        const tRect = trigger.getBoundingClientRect();
+        const mRect = menu.getBoundingClientRect();
+        const below = window.innerHeight - tRect.bottom;
+        const above = tRect.top;
+        if (mRect.height > below && above > below) {
+          menu.style.top = 'auto'; menu.style.bottom = 'calc(100% + 2px)';
+        } else {
+          menu.style.top = 'calc(100% + 2px)'; menu.style.bottom = 'auto';
+        }
+        _closeMenu = bindMenuDismiss(menu, () => { menu.style.display = 'none'; }, (ev) => !menu.contains(ev.target) && ev.target !== trigger);
+      };
+      trigger.addEventListener('click', (e) => { e.stopPropagation(); menu.style.display === 'block' ? _closeMenu() : _openMenu(); });
+      menu.querySelectorAll('.ufp-option').forEach(btn => {
+        btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
+        btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; });
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const k = btn.dataset.value || '';
+          sel.value = k;
+          _setFromKey(k);
+          _closeMenu();
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      });
+      _setFromKey(sel.value || '');
+    })();
+
     // Provider preset → autofill IMAP + SMTP host/port + STARTTLS, set the
     // helper note, and update the Email/Username placeholders to a
     // provider-specific example so users see the right format at a glance.
     el('uf-email-provider').addEventListener('change', (e) => {
       const key = e.target.value;
       _renderProviderNote(key);
+      _syncOauthUI(key);
       const p = PROVIDERS[key];
       if (!p) return;
       el('uf-imap-host').value = p.imap.host;
@@ -3785,11 +4506,29 @@ async function initUnifiedIntegrations() {
       el('uf-imap-starttls').checked = !!p.imap.starttls;
       el('uf-smtp-host').value = p.smtp.host;
       el('uf-smtp-port').value = p.smtp.port;
+      el('uf-smtp-security').value = p.smtp.security || ((parseInt(p.smtp.port || 465) === 587) ? 'starttls' : 'ssl');
       if (p.emailEx) {
         el('uf-email-from').placeholder = p.emailEx;
         el('uf-imap-user').placeholder = p.emailEx;
         el('uf-smtp-user').placeholder = p.emailEx;
       }
+    });
+
+    // Init OAuth UI for accounts already connected via OAuth.
+    if (existing && existing.oauth_provider === 'google') _syncOauthUI('google_workspace');
+
+    // "Connect with Google" — save the account first, then redirect to OAuth.
+    el('uf-oauth-btn').addEventListener('click', async () => {
+      const body = _collectBody();
+      if (!body.name) body.name = body.from_address;
+      if (!body.name) { el('uf-email-msg').textContent = 'Enter a Name or Email first'; el('uf-email-msg').style.color = 'var(--red)'; return; }
+      const url = isEdit ? `/api/email/accounts/${editId}` : '/api/email/accounts';
+      const method = isEdit ? 'PUT' : 'POST';
+      const r = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const d = await r.json();
+      if (!(d.ok || d.id)) { el('uf-email-msg').textContent = d.error || 'Save failed'; el('uf-email-msg').style.color = 'var(--red)'; return; }
+      const accId = isEdit ? editId : d.id;
+      window.location.href = `/api/email/oauth/google/authorize?account_id=${encodeURIComponent(accId)}`;
     });
 
     // "Same as IMAP" toggle — hide the SMTP creds rows when on.
@@ -3804,12 +4543,14 @@ async function initUnifiedIntegrations() {
     if (existing) {
       el('uf-email-name').value = existing.name || '';
       el('uf-email-from').value = existing.from_address || '';
+      el('uf-display-name').value = existing.display_name || '';
       el('uf-imap-host').value = existing.imap_host || '';
       el('uf-imap-port').value = existing.imap_port || 993;
       el('uf-imap-user').value = existing.imap_user || '';
       el('uf-imap-starttls').checked = existing.imap_starttls !== false;
       el('uf-smtp-host').value = existing.smtp_host || '';
       el('uf-smtp-port').value = existing.smtp_port || 465;
+      el('uf-smtp-security').value = _smtpSecurity(existing);
       el('uf-smtp-user').value = existing.smtp_user || '';
       el('uf-email-default').checked = !!existing.is_default;
       // If the saved SMTP user matches the IMAP user, keep the "Same as
@@ -3821,6 +4562,7 @@ async function initUnifiedIntegrations() {
     } else {
       el('uf-imap-port').value = 993;
       el('uf-smtp-port').value = 465;
+      el('uf-smtp-security').value = 'ssl';
     }
     el('uf-email-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
 
@@ -3850,12 +4592,14 @@ async function initUnifiedIntegrations() {
       const body = {
         name: el('uf-email-name').value.trim(),
         from_address: el('uf-email-from').value.trim(),
+        display_name: el('uf-display-name').value.trim(),
         imap_host: el('uf-imap-host').value.trim(),
         imap_port: parseInt(el('uf-imap-port').value) || 993,
         imap_user: el('uf-imap-user').value.trim(),
         imap_starttls: el('uf-imap-starttls').checked,
         smtp_host: el('uf-smtp-host').value.trim(),
         smtp_port: parseInt(el('uf-smtp-port').value) || 465,
+        smtp_security: el('uf-smtp-security').value,
         smtp_user: el('uf-smtp-user').value.trim(),
         is_default: el('uf-email-default').checked,
       };
@@ -3890,7 +4634,15 @@ async function initUnifiedIntegrations() {
       btn.style.color = '';
       btn.style.boxShadow = '';
       btn.style.animation = '';
-      ico.innerHTML = _spinner;
+      // Use the canonical whirlpool spinner so this matches Probe / Test
+      // elsewhere; fall back to the inline CSS ring if the module fails.
+      try {
+        const sp = window.spinnerModule || (await import('./spinner.js')).default;
+        const wp = sp.createWhirlpool(11);
+        wp.element.style.cssText = 'display:inline-flex;width:11px;height:11px;position:relative;top:-2px;';
+        ico.innerHTML = '';
+        ico.appendChild(wp.element);
+      } catch (_) { ico.innerHTML = _spinner; }
       msg.textContent = '';
       msg.style.color = '';
       try {
@@ -3993,14 +4745,14 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Server URL</label><input id="uf-vault-url" class="settings-input" placeholder="https://vault.example.com"></div>
           <div class="settings-row"><label class="settings-label">Email</label><input id="uf-vault-email" class="settings-input" placeholder="you@example.com"></div>
           <div class="settings-row"><label class="settings-label">Master Password</label><input id="uf-vault-pass" class="settings-input" type="password" placeholder="Only required for Login / Unlock"></div>
-          <div class="settings-row" style="margin-top:4px;flex-wrap:wrap;gap:4px">
-            <button class="admin-btn-sm" id="uf-vault-save">Save Config</button>
-            <button class="admin-btn-sm" id="uf-vault-login">Login</button>
-            <button class="admin-btn-sm" id="uf-vault-unlock">Unlock</button>
-            <button class="admin-btn-sm" id="uf-vault-lock" style="opacity:0.7">Lock</button>
-            <button class="admin-btn-sm" id="uf-vault-logout" style="opacity:0.7">Logout</button>
-            <button class="admin-btn-sm" id="uf-vault-cancel" style="opacity:0.7">Cancel</button>
-            <span id="uf-vault-msg" style="font-size:11px;margin-left:4px"></span>
+          <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap;">
+            <span id="uf-vault-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
+            <button class="admin-btn-add" id="uf-vault-save" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">Save Config</button>
+            <button class="admin-btn-add" id="uf-vault-login" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Login</button>
+            <button class="admin-btn-add" id="uf-vault-unlock" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Unlock</button>
+            <button class="admin-btn-add" id="uf-vault-lock" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Lock</button>
+            <button class="admin-btn-add" id="uf-vault-logout" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Logout</button>
+            <button class="admin-btn-add" id="uf-vault-cancel" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Cancel</button>
           </div>
           <div style="font-size:10px;opacity:0.5;margin-top:6px;line-height:1.4">
             <strong>Login</strong> registers this device with your Vaultwarden account (once per account).<br>
@@ -4112,6 +4864,68 @@ async function initUnifiedIntegrations() {
 
   // ── MCP form — full management view ──
   async function showMcpForm(editId) {
+    // Toggle an in-flight loading state on a button (disabled + dimmed + label).
+    function _setBtnLoading(btn, loading, label) {
+      if (!btn) return;
+      btn.disabled = loading;
+      btn.style.opacity = loading ? '0.6' : '';
+      btn.style.cursor = loading ? 'progress' : '';
+      if (label != null) btn.textContent = label;
+    }
+    function _showMcpPasteback(id) {
+      const msg = el('uf-mcp-msg'); if (!msg) return;
+      if (el('uf-mcp-pasteback')) return;  // already shown
+      msg.innerHTML =
+        'Authorize in the opened tab. If the redirect fails (remote access), paste the resulting URL here: ' +
+        '<input id="uf-mcp-pasteback" class="settings-input" placeholder="http://localhost:7000/api/mcp/oauth/callback?code=..." style="margin-top:4px">' +
+        '<button class="admin-btn-sm" id="uf-mcp-paste-go" style="margin-top:4px">Submit</button>';
+      const pasteGo = el('uf-mcp-paste-go');
+      if (pasteGo) pasteGo.addEventListener('click', async () => {
+        const cb = el('uf-mcp-pasteback').value.trim();
+        if (!cb) return;
+        const pf = new FormData(); pf.append('callback_url', cb);
+        _setBtnLoading(pasteGo, true, 'Submitting…');
+        try {
+          await fetch(`/api/mcp/oauth/exchange/${id}`, { method: 'POST', credentials: 'same-origin', body: pf });
+        } finally {
+          _setBtnLoading(pasteGo, false, 'Submit');
+        }
+      });
+    }
+
+    // Drives the OAuth flow: waits for the auth_url (discovery+DCR may lag),
+    // opens it once, then resolves on connected/error.
+    async function _handleMcpAuth(id, initialAuthUrl, tries = 90) {
+      let opened = false;
+      const openAuth = (u) => { if (!opened && u) { opened = true; window.open(u, '_blank', 'noopener'); _showMcpPasteback(id); } };
+      openAuth(initialAuthUrl);
+      const msg = el('uf-mcp-msg');
+      let fails = 0;
+      for (let i = 0; i < tries; i++) {
+        await new Promise(res => setTimeout(res, 2000));
+        try {
+          const r = await fetch('/api/mcp/servers', { credentials: 'same-origin' });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const list = await r.json();
+          fails = 0;
+          const s = Array.isArray(list) ? list.find(x => x.id === id) : null;
+          if (!s) continue;
+          if (s.auth_url) openAuth(s.auth_url);
+          if (s.status === 'connected') {
+            if (msg) msg.textContent = `Connected (${s.tool_count || 0} tools)`;
+            await renderList(); return;
+          }
+          if (s.status === 'error') {
+            if (msg) msg.textContent = `Failed: ${s.error || 'unknown'}`; return;
+          }
+        } catch (e) {
+          // Tolerate a single blip, but surface persistent failures instead of
+          // silently polling until timeout.
+          if (++fails >= 5 && msg) msg.textContent = `Status check failing (${e.message || 'network error'}) — still retrying…`;
+        }
+      }
+      if (msg) msg.textContent = 'Authorization timed out. Reconnect from the server list to retry.';
+    }
     if (editId && editId !== 'new') {
       // Show management view for existing server
       formEl.innerHTML = '<div class="admin-card" style="margin-top:8px"><span style="opacity:0.5;font-size:11px">Loading...</span></div>';
@@ -4131,12 +4945,12 @@ async function initUnifiedIntegrations() {
               <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${statusColor}"></span>
               <span style="font-size:11px;opacity:0.7">${statusText}</span>
             </div>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-              ${srv.needs_oauth ? `<a href="/api/mcp/oauth/authorize/${srv.id}" target="_blank" class="admin-btn-sm" style="background:var(--red);color:#fff;text-decoration:none">Authorize</a>` : ''}
-              <button class="admin-btn-sm" id="uf-mcp-reconnect">Reconnect</button>
-              <button class="admin-btn-sm" id="uf-mcp-toggle">${srv.is_enabled ? 'Disable' : 'Enable'}</button>
-              <button class="admin-btn-sm" id="uf-mcp-cancel" style="opacity:0.7">Close</button>
-              <span id="uf-mcp-msg" style="font-size:11px"></span>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;justify-content:flex-end;">
+              <span id="uf-mcp-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
+              ${srv.needs_oauth ? `<a href="/api/mcp/oauth/authorize/${srv.id}" target="_blank" class="admin-btn-add" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));text-decoration:none;font-weight:600;">Authorize</a>` : ''}
+              <button class="admin-btn-add" id="uf-mcp-reconnect" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Reconnect</button>
+              <button class="admin-btn-add" id="uf-mcp-toggle" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">${srv.is_enabled ? 'Disable' : 'Enable'}</button>
+              <button class="admin-btn-add" id="uf-mcp-cancel" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Close</button>
             </div>
             <div id="uf-mcp-tools-panel"></div>
           </div>`;
@@ -4189,7 +5003,7 @@ async function initUnifiedIntegrations() {
           <h2 style="font-size:13px">Add MCP Server</h2>
           <div class="settings-col">
             <div class="settings-row"><label class="settings-label">Name</label><input id="uf-mcp-name" class="settings-input" placeholder="Server name"></div>
-            <div class="settings-row"><label class="settings-label">Transport</label><select id="uf-mcp-transport" class="settings-input"><option value="stdio">stdio</option><option value="sse">SSE</option></select></div>
+            <div class="settings-row"><label class="settings-label">Transport</label><select id="uf-mcp-transport" class="settings-input"><option value="stdio">stdio</option><option value="sse">SSE</option><option value="http">Streamable HTTP</option></select></div>
             <div id="uf-mcp-stdio-fields" style="display:flex;flex-direction:column;gap:6px;">
               <div class="settings-row"><label class="settings-label">Command</label><input id="uf-mcp-cmd" class="settings-input" placeholder="npx"></div>
               <div class="settings-row"><label class="settings-label">Args</label><input id="uf-mcp-args" class="settings-input" placeholder='["-y", "@modelcontextprotocol/server-filesystem"]'></div>
@@ -4198,13 +5012,20 @@ async function initUnifiedIntegrations() {
             <div id="uf-mcp-sse-fields" style="display:none;flex-direction:column;gap:6px;">
               <div class="settings-row"><label class="settings-label">URL</label><input id="uf-mcp-url" class="settings-input" placeholder="http://localhost:3001/sse"></div>
             </div>
-            <div class="settings-row" style="margin-top:4px"><button class="admin-btn-sm" id="uf-mcp-save">Save</button><button class="admin-btn-sm" id="uf-mcp-cancel" style="opacity:0.7">Cancel</button><span id="uf-mcp-msg" style="font-size:11px"></span></div>
+            <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
+              <span id="uf-mcp-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
+              <button class="admin-btn-add" id="uf-mcp-save" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">Save</button>
+              <button class="admin-btn-add" id="uf-mcp-cancel" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Cancel</button>
+            </div>
           </div>
         </div>`;
       el('uf-mcp-transport').addEventListener('change', () => {
-        const sse = el('uf-mcp-transport').value === 'sse';
-        el('uf-mcp-stdio-fields').style.display = sse ? 'none' : 'flex';
-        el('uf-mcp-sse-fields').style.display = sse ? 'flex' : 'none';
+        const v = el('uf-mcp-transport').value;
+        const isUrl = (v === 'sse' || v === 'http');
+        el('uf-mcp-stdio-fields').style.display = isUrl ? 'none' : 'flex';
+        el('uf-mcp-sse-fields').style.display = isUrl ? 'flex' : 'none';
+        const urlInput = el('uf-mcp-url');
+        if (urlInput) urlInput.placeholder = (v === 'http') ? 'https://mcp.example.com/mcp' : 'http://localhost:3001/sse';
       });
       el('uf-mcp-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
       el('uf-mcp-save').addEventListener('click', async () => {
@@ -4215,50 +5036,537 @@ async function initUnifiedIntegrations() {
         fd.append('transport', transport);
         if (transport === 'stdio') {
           fd.append('command', el('uf-mcp-cmd').value);
-          let args = '[]'; try { args = JSON.stringify(JSON.parse(el('uf-mcp-args').value || '[]')); } catch (_) {}
+          // Unlike env below, an unparseable args value is not silently
+          // defaulted: it would spawn the subprocess with an empty argv.
+          let args;
+          try { args = JSON.stringify(JSON.parse(el('uf-mcp-args').value || '[]')); }
+          catch (_) { el('uf-mcp-msg').textContent = 'Args must be valid JSON, e.g. ["-y", "pkg"]'; return; }
           let env  = '{}'; try { env  = JSON.stringify(JSON.parse(el('uf-mcp-env').value  || '{}')); } catch (_) {}
           fd.append('args', args);
           fd.append('env', env);
         } else {
           fd.append('url', el('uf-mcp-url').value);
         }
+        const saveBtn = el('uf-mcp-save'), cancelBtn = el('uf-mcp-cancel');
+        const _origLabel = saveBtn.textContent;
+        _setBtnLoading(saveBtn, true, 'Saving…'); if (cancelBtn) cancelBtn.disabled = true;
         try {
           const r = await fetch('/api/mcp/servers', { method: 'POST', credentials: 'same-origin', body: fd });
-          if (r.ok) {
+          const data = await r.json().catch(() => ({}));
+          if (r.ok && data.needs_auth) {
+            el('uf-mcp-msg').textContent = 'Preparing authorization…';
+            _handleMcpAuth(data.id, data.auth_url);
+          } else if (r.ok && (data.connected || data.status === 'connected')) {
+            el('uf-mcp-msg').textContent = `Connected (${data.tool_count || 0} tools)`;
+            formEl.style.display = 'none'; await renderList();
+          } else if (r.ok) {
             el('uf-mcp-msg').textContent = 'Saved'; formEl.style.display = 'none'; await renderList();
           } else {
             el('uf-mcp-msg').textContent = `Failed (${r.status})`;
           }
         } catch (_) { el('uf-mcp-msg').textContent = 'Failed'; }
+        finally { _setBtnLoading(saveBtn, false, _origLabel); if (cancelBtn) cancelBtn.disabled = false; }
       });
     }
   }
 
-  // ── Add button with type picker ──
-  if (addBtn) {
-    addBtn.addEventListener('click', () => {
-      formEl.style.display = '';
-      formEl.innerHTML = `
-        <div class="admin-card" style="margin-top:8px">
-          <h2 style="font-size:13px">Add Integration</h2>
-          <div class="settings-col">
-            <div class="settings-row"><label class="settings-label">Type</label>
-              <select id="uf-type-picker" class="settings-input">
-                <option value="">Select...</option>
-                <option value="api">API Service</option>
-                <option value="caldav">CalDAV Calendar</option>
-                <option value="contacts">Contacts Import</option>
-                <option value="carddav">Contacts (CardDAV)</option>
-                <option value="email">Email (IMAP/SMTP)</option>
-                <option value="mcp">MCP Tool Server</option>
-              </select>
+  async function showAgentForm(kind, editId) {
+    const cfg = AGENT_CONFIGS[kind] || AGENT_CONFIGS.codex;
+    let tokens = [];
+    try {
+      const tokRes = await fetch('/api/tokens', { credentials: 'same-origin' });
+      if (tokRes.ok) tokens = await tokRes.json();
+    } catch (_) {}
+
+    const toolScopes = [
+      { key: 'todos:read', label: 'Todos', detail: 'Read notes and checklists' },
+      { key: 'todos:write', label: 'Todos write', detail: 'Create, update, delete, and toggle todo items' },
+      { key: 'documents:read', label: 'Documents', detail: 'Read documents when a document API is enabled' },
+      { key: 'documents:write', label: 'Documents write', detail: 'Create and update draft documents' },
+      { key: 'email:read', label: 'Email', detail: 'Read email when an email API is enabled' },
+      { key: 'email:draft', label: 'Email drafts', detail: 'Create email reply drafts without sending' },
+      { key: 'email:send', label: 'Email send', detail: 'Send email directly' },
+      { key: 'calendar:read', label: 'Calendar', detail: 'Read calendar events when enabled' },
+      { key: 'calendar:write', label: 'Calendar write', detail: 'Create and update calendar events' },
+      { key: 'memory:read', label: 'Memory', detail: 'Read memory when enabled' },
+      { key: 'memory:write', label: 'Memory write', detail: 'Write memory when enabled' },
+      { key: 'cookbook:read', label: 'Cookbook', detail: 'List cookbook tasks + tail their tmux output (debug a model serve from outside the UI)' },
+      { key: 'cookbook:launch', label: 'Cookbook launch', detail: 'Launch and stop cookbook serve tasks. Powerful: runs SSH commands on your configured servers, bounded by the same allowlist the UI uses (vllm/python3/sglang/llama-server/...)' },
+    ];
+    // Strict name-prefix match keeps Codex and Claude tokens in their own forms.
+    const agentTokens = (Array.isArray(tokens) ? tokens : []).filter(tok =>
+      (tok.name || '').toLowerCase().startsWith(cfg.namePrefix)
+    );
+    const current = agentTokens.find(t => String(t.id) === String(editId));
+    const _scopeIcons = {
+      todos: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
+      documents: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+      email: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2 6 12 13 22 6"/></svg>',
+      calendar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+      memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2a2.5 2.5 0 0 0-2.5 2.5 2.5 2.5 0 0 0-2.5 2.5A2.5 2.5 0 0 0 2 9.5v3A2.5 2.5 0 0 0 4.5 15a2.5 2.5 0 0 0 2.5 2.5A2.5 2.5 0 0 0 9.5 20H10V2z"/><path d="M14.5 2a2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1 2.5 2.5A2.5 2.5 0 0 1 22 9.5v3A2.5 2.5 0 0 1 19.5 15a2.5 2.5 0 0 1-2.5 2.5A2.5 2.5 0 0 1 14.5 20H14V2z"/></svg>',
+      cookbook: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+    };
+    const _scopeNiceLabel = (label) => label.replace(/\s+(write|drafts?|send)$/i, '');
+    const _scopeAction = (key) => (key.split(':')[1] || '').toLowerCase();
+    const _pillStyle = (action) => {
+      if (action === 'read') return 'background:rgba(150,150,150,0.18);color:var(--fg-muted,#888);';
+      return 'background:color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);color:var(--accent, var(--red));';
+    };
+    const scopeToggles = (t) => {
+      const scopes = new Set(t.scopes || []);
+      return toolScopes.map(scope => {
+        const tool = scope.key.split(':')[0];
+        const action = _scopeAction(scope.key);
+        const icon = _scopeIcons[tool] || '';
+        const niceLabel = _scopeNiceLabel(scope.label);
+        return `
+        <label class="settings-row" style="align-items:center;gap:8px;display:flex;min-height:30px;padding:2px 0;">
+          <span style="opacity:0.7;display:inline-flex;align-items:center;justify-content:center;width:16px;flex-shrink:0;">${icon}</span>
+          <span class="settings-label" style="width:75px;flex-shrink:0;padding:0;">${esc(niceLabel)}</span>
+          <span style="font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding:1px 7px;border-radius:999px;flex-shrink:0;min-width:44px;text-align:center;margin-left:-3px;box-sizing:border-box;${_pillStyle(action)}">${esc(action)}</span>
+          <span style="font-size:11px;line-height:1.35;opacity:0.62;flex:1;min-width:0;">${esc(scope.detail)}</span>
+          <label class="admin-switch" style="margin-left:auto;flex-shrink:0;"><input type="checkbox" class="uf-codex-scope" data-token-id="${esc(t.id)}" data-scope="${esc(scope.key)}" ${scopes.has(scope.key) ? 'checked' : ''}><span class="admin-slider"></span></label>
+        </label>`;
+      }).join('');
+    };
+    const origin = window.location.origin || '';
+    const setupForToken = (token) => cfg.buildSetup(origin, token);
+
+    // Inline editor for the existing token the user clicked into (current).
+    // Shows the rename input, the prefix/last-used, and scope toggles that
+    // PATCH /api/tokens/{id} on change. The integration row's trash button
+    // handles revoke, so no Revoke button in here.
+    const editExistingHtml = current ? `
+      <div style="border:1px solid var(--border);border-radius:6px;padding:9px 10px;margin-bottom:8px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <input type="text" id="uf-codex-existing-rename" data-token-id="${esc(current.id)}" value="${esc(current.name || cfg.defaultName)}" style="font-size:12px;font-weight:600;padding:3px 6px;flex:1;background:transparent;border:1px solid transparent;border-radius:4px;" title="Click to rename">
+          <span style="font-size:10px;opacity:0.55;">${esc(current.token_prefix || 'token')}...${current.last_used_at ? ` · Last used ${new Date(current.last_used_at).toLocaleDateString()}` : ' · Never used'}</span>
+        </div>
+        <div style="font-size:11px;font-weight:600;opacity:0.62;margin-bottom:4px;">Permissions</div>
+        ${scopeToggles(current)}
+        <div id="uf-codex-existing-msg" style="font-size:11px;min-height:14px;margin-top:4px;"></div>
+      </div>` : '';
+
+    formEl.innerHTML = `
+      <div class="admin-card" style="margin-top:8px">
+        <div class="settings-col">
+          ${editExistingHtml}
+          <div id="uf-codex-prompt" style="display:${current ? 'none' : 'block'};padding:6px 0;">
+            <div style="font-size:11px;opacity:0.7;margin-bottom:6px;">Name this ${esc(cfg.word)} agent so you can tell it apart from other ones (e.g. "${esc(cfg.defaultName)} — laptop").</div>
+            <input type="text" id="uf-codex-name-input" class="settings-select" placeholder="${esc(cfg.defaultName)}" style="width:100%;font-size:12px;padding:6px 8px;">
+          </div>
+          <div id="uf-codex-pending" style="display:none;align-items:center;gap:8px;padding:6px 0;font-size:11px;opacity:0.7;"></div>
+          <div id="uf-codex-reveal" style="display:none;width:100%;box-sizing:border-box;">
+            <div style="font-weight:600;font-size:12px;margin-bottom:6px;">Token</div>
+
+            <div style="font-size:11px;opacity:0.62;margin-bottom:4px;">Copy this token, it won't be shown again.</div>
+            <div style="position:relative;">
+              <code id="uf-codex-token" style="display:block;word-break:break-all;font-size:11px;padding:6px 30px 6px 8px;background:rgba(0,0,0,0.08);border-radius:4px;"></code>
+              <button type="button" class="admin-btn-sm" id="uf-codex-copy-token" title="Copy token" aria-label="Copy token" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);padding:3px 5px;background:none;border:none;color:inherit;opacity:0.7;cursor:pointer;display:inline-flex;align-items:center;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
+
+            <div style="margin-top:14px;font-weight:600;font-size:11px;margin-bottom:4px;">Quickstart &mdash; simply paste directly in your terminal.</div>
+            <div style="font-size:11px;opacity:0.62;margin-bottom:6px;">${cfg.setupDescription}</div>
+            <pre style="margin:0;white-space:pre;overflow-x:auto;max-height:220px;overflow-y:auto;font-size:10px;line-height:1.45;padding:8px 10px;background:rgba(0,0,0,0.08);border-radius:4px;width:100%;box-sizing:border-box;"><code id="uf-codex-setup-code"></code></pre>
+
+            <div style="margin-top:14px;display:flex;align-items:center;gap:8px;">
+              <span style="font-weight:600;font-size:11px;">Configure access</span>
+              <span style="flex:1"></span>
+              <button type="button" class="admin-btn-sm" id="uf-codex-copy-setup" title="Copy setup" aria-label="Copy setup" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:5px;opacity:0.85;">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <span>Copy</span>
+              </button>
+              <button type="button" class="admin-btn-sm" id="uf-codex-toggle-config" aria-expanded="false" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:5px;opacity:0.85;">
+                <svg id="uf-codex-toggle-config-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="transition:transform 0.15s"><polyline points="6 9 12 15 18 9"/></svg>
+                <span>Configure</span>
+              </button>
+            </div>
+            <div id="uf-codex-config-body" style="display:none;">
+              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Odysseus tools this agent can use. New agents start with chat only.</div>
+              <div id="uf-codex-inline-scopes"></div>
             </div>
           </div>
-        </div>`;
-      el('uf-type-picker').addEventListener('change', () => {
-        const v = el('uf-type-picker').value;
-        if (v) showForm(v, 'new');
+          <div class="settings-row" style="margin-top:10px;align-items:center;gap:6px;">
+            <button class="admin-btn-add" id="uf-codex-cancel" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              Cancel
+            </button>
+            <span id="uf-codex-msg" style="font-size:11px;flex:1;text-align:center;"></span>
+            <button class="admin-btn-add" id="uf-codex-revoke" style="display:none;align-items:center;gap:5px;background:color-mix(in srgb, var(--color-error) 10%, transparent);color:var(--color-error);border:1px solid var(--color-error);font-weight:600;">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              Revoke
+            </button>
+            <button class="admin-btn-add" id="uf-codex-create-btn" style="display:${current ? 'none' : 'inline-flex'};align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>
+              Create token
+            </button>
+            <button class="admin-btn-add" id="uf-codex-save" style="display:none;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));font-weight:600;">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              Save
+            </button>
+          </div>
+        </div>
+      </div>`;
+
+    // Editing an existing token: surface Revoke alongside Cancel, and stash
+    // the id so the Revoke handler knows what to DELETE.
+    if (current) {
+      formEl.dataset.createdTokenId = String(current.id);
+      const revokeBtn = el('uf-codex-revoke');
+      if (revokeBtn) revokeBtn.style.display = 'inline-flex';
+      // Inline rename + per-scope PATCH on change.
+      const renameInput = el('uf-codex-existing-rename');
+      if (renameInput) {
+        const original = renameInput.value;
+        const commit = async () => {
+          const name = (renameInput.value || '').trim();
+          if (!name || name === original) return;
+          try {
+            const r = await fetch(`/api/tokens/${renameInput.dataset.tokenId}`, {
+              method: 'PATCH', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name }),
+            });
+            if (!r.ok) throw new Error('Save failed');
+            notifyIntegrationsChanged();
+          } catch (_) { renameInput.value = original; }
+        };
+        renameInput.addEventListener('blur', commit);
+        renameInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); renameInput.blur(); } });
+      }
+      formEl.querySelectorAll('.uf-codex-scope').forEach(cb => {
+        cb.addEventListener('change', async () => {
+          const msg = el('uf-codex-existing-msg');
+          const scopes = ['chat'].concat(
+            Array.from(formEl.querySelectorAll('.uf-codex-scope:checked')).map(input => input.dataset.scope)
+          );
+          try {
+            const r = await fetch(`/api/tokens/${cb.dataset.tokenId}`, {
+              method: 'PATCH', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ scopes }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(d.detail || 'Failed');
+            if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; setTimeout(() => { msg.textContent = ''; }, 1200); }
+            notifyIntegrationsChanged();
+          } catch (err) {
+            cb.checked = !cb.checked;
+            if (msg) { msg.textContent = (err && err.message) || 'Failed'; msg.style.color = 'var(--red)'; }
+          }
+        });
       });
+    }
+
+    el('uf-codex-cancel')?.addEventListener('click', () => { formEl.style.display = 'none'; });
+
+    // Configure access — collapsed by default so the reveal panel doesn't
+    // dump 13 toggles at once. Click reveals + rotates the caret.
+    el('uf-codex-toggle-config')?.addEventListener('click', () => {
+      const body = el('uf-codex-config-body');
+      const btn = el('uf-codex-toggle-config');
+      const caret = el('uf-codex-toggle-config-caret');
+      if (!body || !btn) return;
+      const open = body.style.display === 'none';
+      body.style.display = open ? '' : 'none';
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (caret) caret.style.transform = open ? 'rotate(180deg)' : '';
+    });
+
+    el('uf-codex-save')?.addEventListener('click', async () => {
+      const msg = el('uf-codex-msg');
+      const tokenId = formEl.dataset.createdTokenId;
+      if (!tokenId) { formEl.style.display = 'none'; return; }
+      const scopes = ['chat'].concat(
+        Array.from(formEl.querySelectorAll('#uf-codex-inline-scopes .uf-codex-scope:checked'))
+          .map(input => input.dataset.scope)
+      );
+      try {
+        const r = await fetch(`/api/tokens/${tokenId}`, {
+          method: 'PATCH', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scopes }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || 'Failed');
+        if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; }
+        await renderList();
+        setTimeout(() => { formEl.style.display = 'none'; }, 350);
+      } catch (err) {
+        if (msg) { msg.textContent = err?.message || 'Save failed'; msg.style.color = 'var(--red)'; }
+      }
+    });
+
+    // Revoke = delete this agent token entirely. Confirmation prompt keeps
+    // it from being a one-click footgun. Closes the form on success.
+    el('uf-codex-revoke')?.addEventListener('click', async () => {
+      const tokenId = formEl.dataset.createdTokenId;
+      if (!tokenId) return;
+      const ok = window.styledConfirm
+        ? await window.styledConfirm(`Revoke this ${cfg.word} agent token? Integrations using it will lose access.`, { confirmText: 'Revoke', danger: true })
+        : confirm(`Revoke this ${cfg.word} agent token? Integrations using it will lose access.`);
+      if (!ok) return;
+      const msg = el('uf-codex-msg');
+      try {
+        const r = await fetch(`/api/tokens/${tokenId}`, { method: 'DELETE', credentials: 'same-origin' });
+        if (!r.ok) throw new Error('Revoke failed');
+        if (msg) { msg.textContent = 'Revoked'; msg.style.color = 'var(--color-error)'; }
+        await renderList();
+        setTimeout(() => { formEl.style.display = 'none'; }, 350);
+      } catch (err) {
+        if (msg) { msg.textContent = err?.message || 'Revoke failed'; msg.style.color = 'var(--red)'; }
+      }
+    });
+
+    const _autoCreateCodex = async () => {
+      const msg = el('uf-codex-msg');
+      const prompt = el('uf-codex-prompt');
+      const pending = el('uf-codex-pending');
+      const createBtn = el('uf-codex-create-btn');
+      if (prompt) prompt.style.display = 'none';
+      if (createBtn) createBtn.style.display = 'none';
+      // Whirlpool spinner while the POST is in flight.
+      let _wp = null;
+      if (pending) {
+        pending.innerHTML = '';
+        pending.style.display = 'flex';
+        try {
+          const sp = window.spinnerModule || (await import('./spinner.js')).default;
+          _wp = sp.createWhirlpool(14);
+          _wp.element.style.cssText = 'display:inline-flex;width:14px;height:14px;margin:0 4px 0 0;';
+          pending.appendChild(_wp.element);
+          pending.appendChild(document.createTextNode('Creating token…'));
+        } catch (_) {
+          pending.textContent = 'Creating token…';
+        }
+      }
+      const existingNames = new Set(agentTokens.map(t => (t.name || '').trim()));
+      const nameInput = el('uf-codex-name-input');
+      // User-typed name wins. Empty / whitespace falls back to the default,
+      // auto-suffixed with " 2", " 3"… so two tokens never collide.
+      let name = (nameInput && nameInput.value || '').trim() || cfg.defaultName;
+      if (existingNames.has(name)) {
+        let n = 2;
+        const base = name;
+        while (existingNames.has(name)) { name = `${base} ${n++}`; }
+      }
+      // Minimum scope on creation so the token isn't effectively saved
+      // with everything granted before the user has clicked Save. The
+      // UI toggles below are pre-checked as a preview of what *will*
+      // be granted; nothing else is persisted server-side until Save.
+      const fd = new FormData();
+      fd.append('name', name);
+      fd.append('scopes', 'chat');
+      try {
+        const r = await fetch('/api/tokens', { method: 'POST', credentials: 'same-origin', body: fd });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || 'Failed');
+        if (_wp) { try { _wp.destroy(); } catch (_) {} }
+        if (pending) pending.style.display = 'none';
+        el('uf-codex-token').textContent = d.token || '';
+        el('uf-codex-reveal').style.display = '';
+        const setupBtn = el('uf-codex-copy-setup');
+        if (setupBtn) setupBtn.dataset.token = d.token || '';
+        const setupCode = el('uf-codex-setup-code');
+        if (setupCode) setupCode.textContent = setupForToken(d.token || '');
+        // Populate inline scope toggles for the just-created token with
+        // ALL scopes pre-checked as a UI preview — the underlying token
+        // still only has 'chat' until the user clicks Save below.
+        const uiToken = { id: d.id, scopes: ['chat'].concat(toolScopes.map(s => s.key)) };
+        const inlineEl = el('uf-codex-inline-scopes');
+        if (inlineEl) {
+          inlineEl.innerHTML = `
+            <div class="uf-codex-token" data-token-id="${esc(uiToken.id)}">
+              ${scopeToggles(uiToken)}
+              <div class="uf-codex-scope-msg" data-token-id="${esc(uiToken.id)}" style="font-size:11px;min-height:14px;"></div>
+            </div>`;
+          // No auto-PATCH: scope toggles only persist on Save click below.
+        }
+        // Now that the token exists, surface the Save button.
+        const saveBtn = el('uf-codex-save');
+        if (saveBtn) saveBtn.style.display = 'inline-flex';
+        // Remember the created token id so Save can PATCH its scopes.
+        formEl.dataset.createdTokenId = String(uiToken.id);
+        if (msg) {
+          msg.textContent = `Created "${name}".`;
+          msg.style.color = 'var(--green, #50fa7b)';
+        }
+        await renderList();
+      } catch (err) {
+        if (_wp) { try { _wp.destroy(); } catch (_) {} }
+        if (pending) pending.style.display = 'none';
+        if (msg) {
+          msg.textContent = err?.message || 'Failed';
+          msg.style.color = 'var(--red)';
+        }
+      }
+    };
+    // Bind the explicit Create button; no auto-creation.
+    el('uf-codex-create-btn')?.addEventListener('click', () => { _autoCreateCodex(); });
+    const _copyCodexToken = async (text) => {
+      const value = String(text || '');
+      if (!value) return false;
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(value);
+          return true;
+        } catch (_) {}
+      }
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.setAttribute('readonly', 'readonly');
+      ta.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;z-index:-1;';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, value.length);
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+      ta.remove();
+      return ok;
+    };
+    const _selectTextFallback = (text, containerId) => {
+      const code = document.createElement('pre');
+      code.textContent = text;
+      code.style.cssText = 'white-space:pre-wrap;word-break:break-word;font-size:10px;margin:6px 0 0;';
+      el(containerId)?.appendChild(code);
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    };
+    const COPY_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const CHECK_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    el('uf-codex-copy-setup')?.addEventListener('click', async () => {
+      const token = el('uf-codex-copy-setup')?.dataset.token || '';
+      const btn = el('uf-codex-copy-setup');
+      if (!token) return;
+      const setup = setupForToken(token);
+      const ok = await _copyCodexToken(setup);
+      if (!btn) return;
+      if (ok) {
+        btn.innerHTML = CHECK_ICON;
+        btn.style.color = 'var(--accent, var(--red))';
+        btn.style.opacity = '1';
+      } else {
+        _selectTextFallback(setup, 'uf-codex-reveal');
+      }
+      setTimeout(() => {
+        const latest = el('uf-codex-copy-setup');
+        if (latest) { latest.innerHTML = COPY_ICON; latest.style.color = ''; latest.style.opacity = '0.7'; }
+      }, 1600);
+    });
+    el('uf-codex-copy-token')?.addEventListener('click', async () => {
+      const token = el('uf-codex-token')?.textContent || '';
+      const ok = await _copyCodexToken(token);
+      const btn = el('uf-codex-copy-token');
+      if (!btn) return;
+      if (ok) {
+        btn.innerHTML = CHECK_ICON;
+        btn.style.color = 'var(--accent, var(--red))';
+        btn.style.opacity = '1';
+      } else {
+        _selectTextFallback(token, 'uf-codex-reveal');
+      }
+      setTimeout(() => {
+        const latest = el('uf-codex-copy-token');
+        if (latest) { latest.innerHTML = COPY_ICON; latest.style.color = ''; latest.style.opacity = '0.7'; }
+      }, 1600);
+    });
+    function _wireScopeChange(scope) {
+      scope.querySelectorAll('.uf-codex-scope').forEach(cb => {
+        if (cb.dataset.wired === '1') return;
+        cb.dataset.wired = '1';
+        cb.addEventListener('change', async () => {
+          const tokenId = cb.dataset.tokenId;
+          const panel = formEl.querySelector(`.uf-codex-token[data-token-id="${CSS.escape(tokenId)}"]`);
+          const msg = formEl.querySelector(`.uf-codex-scope-msg[data-token-id="${CSS.escape(tokenId)}"]`);
+          const scopes = Array.from(panel.querySelectorAll('.uf-codex-scope:checked')).map(input => input.dataset.scope);
+          try {
+            const r = await fetch(`/api/tokens/${tokenId}`, {
+              method: 'PATCH',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ scopes }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(d.detail || 'Failed');
+            if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--green, #50fa7b)'; }
+            await renderList();
+          } catch (err) {
+            cb.checked = !cb.checked;
+            if (msg) { msg.textContent = err?.message || 'Failed'; msg.style.color = 'var(--red)'; }
+          }
+        });
+      });
+    }
+    // Note: don't call _wireScopeChange(formEl) here. The existing-token
+    // editor (current) already wires its own change handler that PATCHes
+    // immediately. The inline scopes for a *just-created* token should
+    // remain unwired so they only persist on Save click below.
+  }
+
+  // ── Add button now drops a type-picker menu directly anchored to itself ──
+  if (addBtn) {
+    const _typeOptions = [
+      ['api', 'API Service'],
+      ['caldav', 'CalDAV Calendar'],
+      ['claude', 'Claude Agent'],
+      ['codex', 'Codex Agent'],
+      ['carddav', 'Contacts (CardDAV)'],
+      ['contacts', 'Contacts Import'],
+      ['email', 'Email (IMAP/SMTP)'],
+      ['mcp', 'MCP Tool Server'],
+    ];
+    const _iconFor = (k) => (INTG_TYPES[k]?.icon || '').replace(/width="14"/, 'width="16"').replace(/height="14"/, 'height="16"');
+    const _rowsHtml = _typeOptions.map(([k, label]) => `<button type="button" class="uf-type-option" data-value="${k}" style="display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;"><span style="display:inline-flex;color:var(--accent, var(--red));flex-shrink:0;">${_iconFor(k)}</span><span>${esc(label)}</span></button>`).join('');
+
+    // Anchor wrapper so the absolutely-positioned menu lands directly under
+    // the add button. The button is the wrapper's only sibling.
+    if (!addBtn.parentElement.classList.contains('uf-add-anchor')) {
+      addBtn.parentElement.style.position = 'relative';
+      addBtn.parentElement.classList.add('uf-add-anchor');
+    }
+    // Menu is created per open and removed on close. _closeMenu routes through
+    // the bindMenuDismiss close() bound when the menu opens, so the outside-click
+    // listener + Escape-stack entry are torn down alongside the node removal.
+    let _menuEl = null;
+    let _closeMenu = () => {};
+    addBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (_menuEl) { _closeMenu(); return; }
+      const menu = document.createElement('div');
+      menu.className = 'uf-add-menu';
+      menu.innerHTML = _rowsHtml;
+      menu.style.cssText = 'position:absolute;right:0;z-index:1000;background:var(--panel);border:1px solid var(--border);border-radius:6px;max-height:340px;overflow-y:auto;box-shadow:0 6px 18px rgba(0,0,0,0.25);min-width:220px;';
+      addBtn.parentElement.appendChild(menu);
+      _menuEl = menu;
+      // Drop-up when there isn't enough room below the button (modal near
+      // the viewport bottom, mobile keyboard up, etc.).
+      const tRect = addBtn.getBoundingClientRect();
+      const mRect = menu.getBoundingClientRect();
+      const below = window.innerHeight - tRect.bottom;
+      const above = tRect.top;
+      if (mRect.height > below && above > below) {
+        menu.style.top = 'auto'; menu.style.bottom = 'calc(100% + 2px)';
+      } else {
+        menu.style.top = 'calc(100% + 2px)'; menu.style.bottom = 'auto';
+      }
+      menu.querySelectorAll('.uf-type-option').forEach(btn => {
+        btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
+        btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; });
+        btn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const k = btn.dataset.value;
+          _closeMenu();
+          formEl.style.display = '';
+          showForm(k, 'new');
+        });
+      });
+      _closeMenu = bindMenuDismiss(menu, () => { menu.remove(); _menuEl = null; }, (ev) => !menu.contains(ev.target) && ev.target !== addBtn);
     });
   }
 
@@ -4279,43 +5587,71 @@ function syncAdminVisibility() {
    ═══════════════════════════════════════════ */
 export function open(tab) {
   if (!initialized) initAll();
+
   syncAppearanceCheckboxes();
-  resetWindowPlacement();
-  modalEl.classList.remove('hidden');
+  showSettingsModal(modalEl);
   syncAdminVisibility();
-  const content = modalEl.querySelector('.settings-modal-content');
+
   if (tab) {
-    modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-    modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
+    activateSettingsPanel(modalEl, tab);
   }
-  // Auto-init admin data if showing an admin tab
-  const activeTab = tab || (modalEl.querySelector('[data-settings-tab].active') || {}).dataset?.settingsTab || 'services';
-  document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
-  syncAppearanceOpacity(activeTab === 'appearance');
-  if (activeTab === 'ai') refreshAiModelEndpoints();
-  if (ADMIN_TABS.has(activeTab) && window.adminModule && !window.adminModule._initialized) {
+
+  // Preserve existing panel-specific side effects when Settings is opened
+  // directly to a tab as well as when the user navigates there.
+  const activeTab = tab || getActiveSettingsTab(modalEl);
+  onSettingsPanelActivated(activeTab);
+
+  // Auto-init admin data if showing an admin tab.
+  if (isAdminManagedSettingsTab(activeTab) && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
 }
 
 export function close() {
   if (!modalEl) return;
-  // Always clear the appearance-tab body class so the rest of the app
-  // doesn't keep its dimmed state if the modal got closed mid-tab.
+
+  // Always clear the Appearance state so the rest of the app does not remain
+  // dimmed if Settings is closed while that panel is active.
   document.body.classList.remove('settings-appearance-open');
-  syncAppearanceOpacity(false); // clear any opacity-slider fade
-  const content = modalEl.querySelector('.modal-content, .settings-modal-content');
-  if (content && !content.classList.contains('modal-closing')) {
-    content.classList.add('modal-closing');
-    content.addEventListener('animationend', () => {
-      modalEl.classList.add('hidden');
-      content.classList.remove('modal-closing');
-    }, { once: true });
-    setTimeout(() => { if (!modalEl.classList.contains('hidden')) { modalEl.classList.add('hidden'); content.classList.remove('modal-closing'); } }, 250);
-  } else {
-    modalEl.classList.add('hidden');
-  }
+  syncAppearanceOpacity(false);
+
+  hideSettingsModal(modalEl);
 }
+
+// Handle redirect back from Google OAuth2 — open settings to integrations and show status.
+(function _handleOauthRedirect() {
+  const sp = new URLSearchParams(window.location.search);
+  if (!sp.has('email_oauth_success') && !sp.has('email_oauth_error')) return;
+  // Strip params from URL without a page reload.
+  const clean = window.location.pathname + window.location.hash;
+  window.history.replaceState(null, '', clean);
+  const success = sp.has('email_oauth_success');
+  const errMsg = sp.get('email_oauth_error') || '';
+  // Open settings → integrations once the document is ready. This module owns
+  // the open() API, so it does not need to wait for a window-level alias.
+  function _showResult() {
+    open('integrations');
+    // Brief toast-style banner.
+    const banner = document.createElement('div');
+    banner.textContent = success
+      ? 'Google account connected — email is ready'
+      : `Google OAuth failed: ${errMsg || 'unknown error'}`;
+    Object.assign(banner.style, {
+      position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
+      background: success ? 'var(--accent, #50fa7b)' : 'var(--red, #ff5555)',
+      color: '#000', padding: '8px 18px', borderRadius: '6px', fontSize: '12px',
+      fontWeight: '600', zIndex: '99999', pointerEvents: 'none',
+      boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
+    });
+    document.body.appendChild(banner);
+    setTimeout(() => banner.remove(), 4000);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _showResult, { once: true });
+  } else {
+    _showResult();
+  }
+})();
 
 const settingsModule = { open, close, initIntegrations, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
 

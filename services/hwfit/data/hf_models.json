@@ -4375,7 +4375,14 @@
   "hf_downloads": 51135,
   "hf_likes": 2,
   "release_date": "2025-09-23",
-  "_discovered": true
+  "_discovered": true,
+  "gguf_sources": [
+   {
+    "repo": "typhoon-ai/typhoon2.5-qwen3-4b-gguf",
+    "file": "typhoon2.5-qwen3-4b-q4_k_m.gguf",
+    "quant": "Q4_K_M"
+   }
+  ]
  },
  {
   "name": "JunHowie/Qwen3-4B-Instruct-2507-GPTQ-Int4",
@@ -5102,6 +5109,150 @@
   "hf_likes": 478,
   "release_date": "2023-10-29",
   "_discovered": true
+ },
+ {
+  "name": "deepseek-ai/DeepSeek-V4-Flash",
+  "provider": "deepseek-ai",
+  "parameter_count": "158.1B",
+  "parameters_raw": 158069433298,
+  "active_parameters": 13000000000,
+  "is_moe": true,
+  "min_ram_gb": 200.0,
+  "recommended_ram_gb": 320.0,
+  "min_vram_gb": 156.0,
+  "quantization": "FP4-MoE-Mixed",
+  "context_length": 1000000,
+  "use_case": "General-purpose reasoning, long-context",
+  "capabilities": [
+   "long_context",
+   "reasoning",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "deepseek_v4_moe",
+  "hf_downloads": 1882337,
+  "hf_likes": 1651,
+  "release_date": "2026-06-22"
+ },
+ {
+  "name": "deepseek-ai/DeepSeek-V4-Flash-DSpark",
+  "provider": "deepseek-ai",
+  "parameter_count": "165.3B",
+  "parameters_raw": 165265454782,
+  "active_parameters": 13000000000,
+  "is_moe": true,
+  "active_experts": 6,
+  "min_ram_gb": 170.0,
+  "recommended_ram_gb": 250.0,
+  "min_vram_gb": 165.0,
+  "quantization": "FP8-Mixed",
+  "context_length": 1000000,
+  "use_case": "General-purpose reasoning, long-context",
+  "capabilities": [
+   "long_context",
+   "reasoning",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "deepseek_v4_moe",
+  "hf_downloads": 4446,
+  "hf_likes": 107,
+  "release_date": "2026-06-27"
+ },
+ {
+  "name": "deepseek-ai/DeepSeek-V4-Flash-Base",
+  "provider": "deepseek-ai",
+  "parameter_count": "292.0B",
+  "parameters_raw": 292021347282,
+  "active_parameters": 13000000000,
+  "is_moe": true,
+  "min_ram_gb": 290.0,
+  "recommended_ram_gb": 460.0,
+  "min_vram_gb": 284.0,
+  "quantization": "FP8-Mixed",
+  "context_length": 1000000,
+  "use_case": "Base pretrained \u2014 fine-tuning starting point",
+  "capabilities": [
+   "long_context",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "deepseek_v4_moe",
+  "hf_downloads": 76030,
+  "hf_likes": 256,
+  "release_date": "2026-04-27"
+ },
+ {
+  "name": "deepseek-ai/DeepSeek-V4-Pro",
+  "provider": "deepseek-ai",
+  "parameter_count": "861.6B",
+  "parameters_raw": 861608274846,
+  "active_parameters": 49000000000,
+  "is_moe": true,
+  "min_ram_gb": 1100.0,
+  "recommended_ram_gb": 1800.0,
+  "min_vram_gb": 880.0,
+  "quantization": "FP4-MoE-Mixed",
+  "context_length": 1000000,
+  "use_case": "Flagship reasoning, long-context",
+  "capabilities": [
+   "long_context",
+   "reasoning",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "deepseek_v4_moe",
+  "hf_downloads": 1154610,
+  "hf_likes": 5118,
+  "release_date": "2026-06-22"
+ },
+ {
+  "name": "deepseek-ai/DeepSeek-V4-Pro-DSpark",
+  "provider": "deepseek-ai",
+  "parameter_count": "889.5B",
+  "parameters_raw": 889484881098,
+  "active_parameters": 49000000000,
+  "is_moe": true,
+  "active_experts": 6,
+  "min_ram_gb": 900.0,
+  "recommended_ram_gb": 1250.0,
+  "min_vram_gb": 890.0,
+  "quantization": "FP8-Mixed",
+  "context_length": 1000000,
+  "use_case": "Flagship reasoning, long-context",
+  "capabilities": [
+   "long_context",
+   "reasoning",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "deepseek_v4_moe",
+  "hf_downloads": 6939,
+  "hf_likes": 241,
+  "release_date": "2026-06-27"
+ },
+ {
+  "name": "deepseek-ai/DeepSeek-V4-Pro-Base",
+  "provider": "deepseek-ai",
+  "parameter_count": "1.6T",
+  "parameters_raw": 1600790440862,
+  "active_parameters": 49000000000,
+  "is_moe": true,
+  "min_ram_gb": 1700.0,
+  "recommended_ram_gb": 2600.0,
+  "min_vram_gb": 1600.0,
+  "quantization": "FP8-Mixed",
+  "context_length": 1000000,
+  "use_case": "Base pretrained \u2014 fine-tuning starting point",
+  "capabilities": [
+   "long_context",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "deepseek_v4_moe",
+  "hf_downloads": 25387,
+  "hf_likes": 305,
+  "release_date": "2026-04-27"
  },
  {
   "name": "deepseek-ai/deepseek-coder-6.7b-base",
@@ -8994,7 +9145,14 @@
   "num_experts": 128,
   "active_experts": 8,
   "active_parameters": 3339450907,
-  "_discovered": true
+  "_discovered": true,
+  "gguf_sources": [
+   {
+    "repo": "typhoon-ai/typhoon2.5-qwen3-30b-a3b-gguf",
+    "file": "typhoon2.5-qwen3-30b-a3b-q4_k_m.gguf",
+    "quant": "Q4_K_M"
+   }
+  ]
  },
  {
   "name": "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ",
@@ -12078,7 +12236,7 @@
   "min_ram_gb": 421.3,
   "recommended_ram_gb": 702.1,
   "min_vram_gb": 386.1,
-  "quantization": "Q4_K_M",
+  "quantization": "BF16",
   "context_length": 202752,
   "use_case": "General purpose text generation",
   "capabilities": [],
@@ -12087,6 +12245,24 @@
   "hf_downloads": 205187,
   "hf_likes": 1698,
   "release_date": "2026-02-11"
+ },
+ {
+  "name": "zai-org/GLM-5.1",
+  "provider": "zai-org",
+  "parameter_count": "753.9B",
+  "parameters_raw": 753864139008,
+  "min_ram_gb": 421.3,
+  "recommended_ram_gb": 702.1,
+  "min_vram_gb": 386.1,
+  "quantization": "BF16",
+  "context_length": 202752,
+  "use_case": "General purpose text generation",
+  "capabilities": [],
+  "pipeline_tag": "text-generation",
+  "architecture": "glm_moe_dsa",
+  "hf_downloads": 141194,
+  "hf_likes": 0,
+  "release_date": "2026-04-03"
  },
  {
   "name": "moonshotai/Kimi-K2-Instruct",
@@ -13183,6 +13359,106 @@
   "gguf_sources": []
  },
  {
+  "name": "zai-org/GLM-5.2",
+  "provider": "zai-org",
+  "parameter_count": "753.3B",
+  "parameters_raw": 753329940480,
+  "min_ram_gb": 1510.0,
+  "recommended_ram_gb": 1800.0,
+  "min_vram_gb": 1510.0,
+  "quantization": "BF16",
+  "context_length": 1048576,
+  "use_case": "General purpose reasoning, coding, long-context",
+  "capabilities": [
+   "long_context",
+   "reasoning",
+   "coding",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "glm_moe_dsa",
+  "hf_downloads": 142547,
+  "hf_likes": 2996,
+  "release_date": "2026-06-23",
+  "is_moe": true,
+  "active_experts": 8,
+  "gguf_sources": [
+   {
+    "repo": "unsloth/GLM-5.2-GGUF",
+    "provider": "unsloth",
+    "file": "UD-Q4_K_M/*.gguf",
+    "quant": "Q4_K_M"
+   }
+  ]
+ },
+ {
+  "name": "zai-org/GLM-5.2-FP8",
+  "provider": "zai-org",
+  "parameter_count": "753.4B",
+  "parameters_raw": 753375793584,
+  "min_ram_gb": 760.0,
+  "recommended_ram_gb": 900.0,
+  "min_vram_gb": 760.0,
+  "quantization": "FP8",
+  "context_length": 1048576,
+  "use_case": "General purpose reasoning, coding, long-context",
+  "capabilities": [
+   "long_context",
+   "reasoning",
+   "coding",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "glm_moe_dsa",
+  "hf_downloads": 884226,
+  "hf_likes": 182,
+  "release_date": "2026-06-23",
+  "is_moe": true,
+  "active_experts": 8,
+  "gguf_sources": [
+   {
+    "repo": "unsloth/GLM-5.2-GGUF",
+    "provider": "unsloth",
+    "file": "UD-Q4_K_M/*.gguf",
+    "quant": "Q4_K_M"
+   }
+  ]
+ },
+ {
+  "name": "unsloth/GLM-5.2-GGUF",
+  "provider": "unsloth",
+  "parameter_count": "753.9B",
+  "parameters_raw": 753864139008,
+  "min_ram_gb": 452.0,
+  "recommended_ram_gb": 620.0,
+  "min_vram_gb": 452.0,
+  "quantization": "Q4_K_M",
+  "context_length": 1048576,
+  "use_case": "General purpose reasoning, coding, long-context (GGUF)",
+  "capabilities": [
+   "long_context",
+   "reasoning",
+   "coding",
+   "moe"
+  ],
+  "pipeline_tag": "text-generation",
+  "architecture": "glm-dsa",
+  "hf_downloads": 180394,
+  "hf_likes": 474,
+  "release_date": "2026-06-23",
+  "is_moe": true,
+  "active_experts": 8,
+  "is_gguf": true,
+  "gguf_sources": [
+   {
+    "repo": "unsloth/GLM-5.2-GGUF",
+    "provider": "unsloth",
+    "file": "UD-Q4_K_M/*.gguf",
+    "quant": "Q4_K_M"
+   }
+  ]
+ },
+ {
   "name": "cyankiwi/Qwen3.5-35B-A3B-AWQ-4bit",
   "provider": "cyankiwi",
   "parameter_count": "35.0B",
@@ -13855,53 +14131,6 @@
   "capabilities": []
  },
  {
-  "name": "deepseek-ai/DeepSeek-V4-Flash",
-  "provider": "DeepSeek",
-  "parameter_count": "158B",
-  "parameters_raw": 158000000000,
-  "min_ram_gb": 165.0,
-  "recommended_ram_gb": 205.0,
-  "min_vram_gb": 165.0,
-  "quantization": "FP8",
-  "context_length": 1000000,
-  "use_case": "General purpose, reasoning (MoE)",
-  "is_moe": true,
-  "num_experts": null,
-  "active_experts": null,
-  "active_parameters": 13000000000,
-  "architecture": "deepseek_v4",
-  "pipeline_tag": "text-generation",
-  "release_date": "2026-04-22",
-  "gguf_sources": [
-   {
-    "repo": "unsloth/DeepSeek-V4-Flash",
-    "provider": "unsloth"
-   }
-  ],
-  "capabilities": []
- },
- {
-  "name": "deepseek-ai/DeepSeek-V4-Pro",
-  "provider": "DeepSeek",
-  "parameter_count": "1600B",
-  "parameters_raw": 1600000000000,
-  "min_ram_gb": 928.5,
-  "recommended_ram_gb": 1207.0,
-  "min_vram_gb": 928.5,
-  "quantization": "Q4_K_M",
-  "context_length": 1000000,
-  "use_case": "Frontier reasoning (MoE)",
-  "is_moe": true,
-  "num_experts": null,
-  "active_experts": null,
-  "active_parameters": 49000000000,
-  "architecture": "deepseek_v4",
-  "pipeline_tag": "text-generation",
-  "release_date": "2026-04-22",
-  "gguf_sources": [],
-  "capabilities": []
- },
- {
   "name": "google/gemma-4-E2B-it",
   "provider": "Google",
   "parameter_count": "5.1B",
@@ -13919,7 +14148,12 @@
   "architecture": "gemma4",
   "pipeline_tag": "image-text-to-text",
   "release_date": "2026-04-01",
-  "gguf_sources": [],
+  "gguf_sources": [
+   {
+    "repo": "unsloth/gemma-4-E2B-it-GGUF",
+    "provider": "unsloth"
+   }
+  ],
   "capabilities": [
    "vision"
   ]
@@ -13942,7 +14176,167 @@
   "architecture": "gemma4",
   "pipeline_tag": "image-text-to-text",
   "release_date": "2026-04-01",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/gemma-4-E4B-it-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "capabilities": [
+   "vision"
+  ]
+ },
+ {
+  "name": "google/gemma-4-12B",
+  "provider": "Google",
+  "parameter_count": "12.0B",
+  "parameters_raw": 12000000000,
+  "min_ram_gb": 24.0,
+  "recommended_ram_gb": 32.0,
+  "min_vram_gb": 24.0,
+  "quantization": "BF16",
+  "context_length": 131072,
+  "use_case": "General purpose, multimodal",
+  "is_moe": false,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": null,
+  "architecture": "gemma4",
+  "pipeline_tag": "image-text-to-text",
+  "release_date": "2026-04-01",
   "gguf_sources": [],
+  "capabilities": [
+   "vision"
+  ]
+ },
+ {
+  "name": "google/gemma-4-12B-it",
+  "provider": "Google",
+  "parameter_count": "12.0B",
+  "parameters_raw": 12000000000,
+  "min_ram_gb": 8.5,
+  "recommended_ram_gb": 11.0,
+  "min_vram_gb": 7.5,
+  "quantization": "Q4_K_M",
+  "context_length": 131072,
+  "use_case": "General purpose, multimodal; unsloth/gemma-4-12B-it-GGUF Dynamic variants reduce VRAM from ~7.5 GB to ~5.5 GB",
+  "is_moe": false,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": null,
+  "architecture": "gemma4",
+  "pipeline_tag": "image-text-to-text",
+  "release_date": "2026-04-01",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/gemma-4-12B-it-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "capabilities": [
+   "vision"
+  ]
+ },
+ {
+  "name": "google/gemma-4-12B-it-qat-int4",
+  "provider": "Google",
+  "parameter_count": "12.0B",
+  "parameters_raw": 12000000000,
+  "min_ram_gb": 8.0,
+  "recommended_ram_gb": 9.5,
+  "min_vram_gb": 6.5,
+  "quantization": "QAT-INT4",
+  "context_length": 131072,
+  "use_case": "General purpose, multimodal (QAT quantization-aware training — higher quality than post-train INT4; vLLM native; no GGUF)",
+  "is_moe": false,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": null,
+  "architecture": "gemma4",
+  "pipeline_tag": "image-text-to-text",
+  "release_date": "2026-04-01",
+  "gguf_sources": [],
+  "capabilities": [
+   "vision"
+  ]
+ },
+ {
+  "name": "google/gemma-4-12B-it-qat-int8",
+  "provider": "Google",
+  "parameter_count": "12.0B",
+  "parameters_raw": 12000000000,
+  "min_ram_gb": 15.0,
+  "recommended_ram_gb": 20.0,
+  "min_vram_gb": 13.5,
+  "quantization": "QAT-INT8",
+  "context_length": 131072,
+  "use_case": "General purpose, multimodal (QAT INT8 — highest quality, 2x VRAM of QAT-INT4; vLLM native; no GGUF)",
+  "is_moe": false,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": null,
+  "architecture": "gemma4",
+  "pipeline_tag": "image-text-to-text",
+  "release_date": "2026-04-01",
+  "gguf_sources": [],
+  "capabilities": [
+   "vision"
+  ]
+ },
+ {
+  "name": "google/gemma-4-12B-it-qat-q4_0-gguf",
+  "provider": "Google",
+  "parameter_count": "12.0B",
+  "parameters_raw": 12000000000,
+  "min_ram_gb": 8.5,
+  "recommended_ram_gb": 11.0,
+  "min_vram_gb": 7.5,
+  "quantization": "QAT-INT4",
+  "context_length": 262144,
+  "use_case": "General purpose, multimodal (vision + audio); official Google QAT int4 GGUF — near-bf16 quality at int4 size, served on llama.cpp/Ollama with CPU offload",
+  "is_moe": false,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": null,
+  "architecture": "gemma4",
+  "pipeline_tag": "image-text-to-text",
+  "release_date": "2026-04-01",
+  "gguf_sources": [
+   {
+    "repo": "google/gemma-4-12B-it-qat-q4_0-gguf",
+    "provider": "Google",
+    "file": "gemma-4-12b-it-qat-q4_0.gguf"
+   }
+  ],
+  "capabilities": [
+   "vision",
+   "audio"
+  ]
+ },
+ {
+  "name": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+  "provider": "Google",
+  "parameter_count": "25.2B",
+  "parameters_raw": 25200000000,
+  "min_ram_gb": 14.4,
+  "recommended_ram_gb": 18.0,
+  "min_vram_gb": 14.4,
+  "quantization": "QAT-INT4",
+  "context_length": 262144,
+  "use_case": "High-throughput, multimodal MoE (3.8B active); official Google QAT int4 GGUF — near-bf16 quality at int4 size, served on llama.cpp with CPU offload",
+  "is_moe": true,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": 3800000000,
+  "architecture": "gemma4",
+  "pipeline_tag": "image-text-to-text",
+  "release_date": "2026-04-01",
+  "gguf_sources": [
+   {
+    "repo": "google/gemma-4-26B-A4B-it-qat-q4_0-gguf",
+    "provider": "Google"
+   }
+  ],
   "capabilities": [
    "vision"
   ]
@@ -13965,7 +14359,12 @@
   "architecture": "gemma4",
   "pipeline_tag": "image-text-to-text",
   "release_date": "2026-04-01",
-  "gguf_sources": [],
+  "gguf_sources": [
+   {
+    "repo": "unsloth/gemma-4-31B-it-GGUF",
+    "provider": "unsloth"
+   }
+  ],
   "capabilities": [
    "vision"
   ]
@@ -13988,7 +14387,12 @@
   "architecture": "gemma4",
   "pipeline_tag": "image-text-to-text",
   "release_date": "2026-04-01",
-  "gguf_sources": [],
+  "gguf_sources": [
+   {
+    "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+    "provider": "unsloth"
+   }
+  ],
   "capabilities": [
    "vision"
   ]
@@ -18702,6 +19106,54 @@
   "active_parameters": 13600000000
  },
  {
+  "name": "MiniMaxAI/MiniMax-M3",
+  "provider": "MiniMaxAI",
+  "parameter_count": "427.0B",
+  "parameters_raw": 427040140160,
+  "min_ram_gb": 855.0,
+  "recommended_ram_gb": 1025.0,
+  "min_vram_gb": 855.0,
+  "quantization": "BF16",
+  "context_length": 1000000,
+  "use_case": "Vision, chat, coding, agentic tool use",
+  "capabilities": [
+   "vision",
+   "tool_use",
+   "coding",
+   "moe"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "minimax_m3_vl",
+  "hf_downloads": 192311,
+  "hf_likes": 1267,
+  "release_date": "2026-06-23",
+  "is_moe": true
+ },
+ {
+  "name": "MiniMaxAI/MiniMax-M3-MXFP8",
+  "provider": "MiniMaxAI",
+  "parameter_count": "440.3B",
+  "parameters_raw": 440279845760,
+  "min_ram_gb": 445.0,
+  "recommended_ram_gb": 560.0,
+  "min_vram_gb": 445.0,
+  "quantization": "MXFP8",
+  "context_length": 1000000,
+  "use_case": "Vision, chat, coding, agentic tool use",
+  "capabilities": [
+   "vision",
+   "tool_use",
+   "coding",
+   "moe"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "minimax_m3_vl",
+  "hf_downloads": 572278,
+  "hf_likes": 43,
+  "release_date": "2026-06-15",
+  "is_moe": true
+ },
+ {
   "name": "bullerwins/MiniMax-M2.7-REAP-172B-fp8",
   "provider": "bullerwins",
   "parameter_count": "172B",
@@ -18718,6 +19170,308 @@
   "hf_downloads": 9,
   "hf_likes": 0,
   "release_date": "2026-04-19",
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.6-27B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "27.8B",
+  "parameters_raw": 27781427952,
+  "min_ram_gb": 16.6,
+  "recommended_ram_gb": 21.6,
+  "min_vram_gb": 16.6,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, coding, MTP",
+  "is_moe": false,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": null,
+  "architecture": "qwen3",
+  "pipeline_tag": "text-generation",
+  "release_date": "2026-04-01",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.6-27B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "capabilities": [
+   "mtp"
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.6-35B-A3B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "36.0B",
+  "parameters_raw": 35951822704,
+  "min_ram_gb": 21.4,
+  "recommended_ram_gb": 27.8,
+  "min_vram_gb": 21.4,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose (MoE), MTP",
+  "is_moe": true,
+  "num_experts": null,
+  "active_experts": null,
+  "active_parameters": 3000000000,
+  "architecture": "qwen3_moe",
+  "pipeline_tag": "text-generation",
+  "release_date": "2026-04-01",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "capabilities": [
+   "mtp"
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-0.8B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "873M",
+  "parameters_raw": 873438784,
+  "min_ram_gb": 1.0,
+  "recommended_ram_gb": 2.0,
+  "min_vram_gb": 0.5,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5",
+  "hf_downloads": 93448,
+  "hf_likes": 208,
+  "release_date": "2026-02-28",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-0.8B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-2B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "2.3B",
+  "parameters_raw": 2274069824,
+  "min_ram_gb": 1.3,
+  "recommended_ram_gb": 2.1,
+  "min_vram_gb": 1.2,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5",
+  "hf_downloads": 46974,
+  "hf_likes": 115,
+  "release_date": "2026-02-28",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-2B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-4B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "4.7B",
+  "parameters_raw": 4659865088,
+  "min_ram_gb": 2.6,
+  "recommended_ram_gb": 4.3,
+  "min_vram_gb": 2.4,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5",
+  "hf_downloads": 99087,
+  "hf_likes": 202,
+  "release_date": "2026-02-27",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-4B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-9B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "9.7B",
+  "parameters_raw": 9653104368,
+  "min_ram_gb": 5.4,
+  "recommended_ram_gb": 9.0,
+  "min_vram_gb": 4.9,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5",
+  "hf_downloads": 172298,
+  "hf_likes": 345,
+  "release_date": "2026-02-27",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-9B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-27B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "27.8B",
+  "parameters_raw": 27781427952,
+  "min_ram_gb": 15.5,
+  "recommended_ram_gb": 25.9,
+  "min_vram_gb": 14.2,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5",
+  "hf_downloads": 406808,
+  "hf_likes": 565,
+  "release_date": "2026-02-24",
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-27B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-35B-A3B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "36.0B",
+  "parameters_raw": 35951822704,
+  "min_ram_gb": 20.1,
+  "recommended_ram_gb": 33.5,
+  "min_vram_gb": 18.4,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5_moe",
+  "hf_downloads": 769032,
+  "hf_likes": 905,
+  "release_date": "2026-02-24",
+  "is_moe": true,
+  "num_experts": 256,
+  "active_experts": 8,
+  "active_parameters": 3000000000,
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-35B-A3B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-122B-A10B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "125.1B",
+  "parameters_raw": 125086497008,
+  "min_ram_gb": 69.9,
+  "recommended_ram_gb": 116.5,
+  "min_vram_gb": 64.1,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5_moe",
+  "hf_downloads": 171055,
+  "hf_likes": 389,
+  "release_date": "2026-02-24",
+  "is_moe": true,
+  "num_experts": 256,
+  "active_experts": 8,
+  "active_parameters": 10000000000,
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-122B-A10B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
+  "_discovered": true
+ },
+ {
+  "name": "Qwen/Qwen3.5-397B-A17B-MTP",
+  "provider": "Qwen",
+  "parameter_count": "403.4B",
+  "parameters_raw": 403397928944,
+  "min_ram_gb": 225.4,
+  "recommended_ram_gb": 375.7,
+  "min_vram_gb": 206.6,
+  "quantization": "Q4_K_M",
+  "context_length": 262144,
+  "use_case": "General purpose, MTP",
+  "capabilities": [
+   "mtp",
+   "tool_use",
+   "vision"
+  ],
+  "pipeline_tag": "image-text-to-text",
+  "architecture": "qwen3_5_moe",
+  "hf_downloads": 1291825,
+  "hf_likes": 1214,
+  "release_date": "2026-02-16",
+  "is_moe": true,
+  "num_experts": 256,
+  "active_experts": 8,
+  "active_parameters": 17000000000,
+  "gguf_sources": [
+   {
+    "repo": "unsloth/Qwen3.5-397B-A17B-MTP-GGUF",
+    "provider": "unsloth"
+   }
+  ],
   "_discovered": true
  }
 ]

@@ -15,7 +15,7 @@ GATED_IMAGE_FUNCTIONS = {
 
 
 def _gallery_source():
-    return Path("routes/gallery_routes.py").read_text(encoding="utf-8")
+    return Path("routes/gallery/gallery_routes.py").read_text(encoding="utf-8")
 
 
 def _function_sources(source):
@@ -37,4 +37,6 @@ def test_image_generation_endpoints_require_image_privilege():
 
 
 def test_gallery_routes_imports_privilege_helper():
-    assert "from src.auth_helpers import get_current_user, require_privilege" in _gallery_source()
+    source = _gallery_source()
+    assert "get_current_user" in source
+    assert "require_privilege" in source

@@ -5,8 +5,131 @@
  */
 
 import uiModule from './ui.js';
+import { splitTableRow } from './markdown/tableRow.js';
+import { replaceEmojiShortcodes, hasEmojiShortcode } from './emojiShortcodes.js';
 
 var escapeHtml = uiModule.esc;
+
+// Mermaid and KaTeX are vendored under /static/lib and fetched on first use.
+// Loading them from <head> cost every session ~985 KB on the wire even though
+// most chats never contain a diagram or a formula. Both loaders memoise the
+// *promise* rather than the resolved library, so concurrent callers share one
+// fetch and a double trigger cannot start two loads. A failed load clears the
+// memo so the next diagram/formula retries instead of being poisoned forever.
+const MERMAID_SRC = '/static/lib/mermaid.min.js';
+const KATEX_SRC = '/static/lib/katex/katex.min.js';
+const KATEX_CSS = '/static/lib/katex/katex.min.css';
+// Marks math emitted before KaTeX finished loading; renderMath() swaps these
+// for typeset output. The source stays as readable text inside the span, so a
+// load that never completes degrades to plain text rather than to nothing.
+const MATH_PENDING_CLASS = 'ody-math-pending';
+
+// KaTeX has no entity syntax: it reads a bare "&" as an alignment marker and
+// errors out on anything that is not a valid column break, so "a &lt; b" comes
+// back as a red .katex-error instead of a formula. mdToHtml escapes the whole
+// string before the math pass, which leaves two spellings of the same
+// character at the delimiters — a typed "<" arrives as "&lt;", while a typed
+// "&lt;" arrives as "&amp;lt;" — and both have to reach KaTeX as "<".
+//
+// One alternation, longest form first, so nothing this writes is scanned
+// again. Chained .replace() calls cannot do it: unescaping "&amp;" first lets
+// the next pass eat the "&lt;" it just produced (the double-unescape CodeQL
+// flags), and unescaping it last leaves the entity spelling intact and breaks
+// the render. The code-block pass upstream keeps its chained order on purpose
+// — Markdown does not decode entities inside code, so "&lt;" there is meant to
+// stay visible.
+const MATH_SOURCE_ENTITY_RE = /&amp;(?:lt|gt|amp|quot|#39);|&lt;|&gt;|&amp;/g;
+const MATH_SOURCE_ENTITIES = {
+  '&amp;lt;': '<',
+  '&amp;gt;': '>',
+  '&amp;amp;': '&',
+  '&amp;quot;': '"',
+  '&amp;#39;': "'",
+  '&lt;': '<',
+  '&gt;': '>',
+  '&amp;': '&',
+};
+
+function decodeMathSource(text) {
+  return String(text).replace(MATH_SOURCE_ENTITY_RE, (entity) => MATH_SOURCE_ENTITIES[entity]);
+}
+
+let _mermaidPromise = null;
+let _katexPromise = null;
+let _mathFlushScheduled = false;
+
+function _loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.addEventListener('load', () => resolve(), { once: true });
+    script.addEventListener('error', () => reject(new Error('Failed to load ' + src)), { once: true });
+    document.head.appendChild(script);
+  });
+}
+
+function _loadStylesheet(href) {
+  // Resolves either way: without the stylesheet KaTeX still produces correct
+  // markup, just unstyled, which beats failing the whole math render.
+  return new Promise((resolve) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.addEventListener('load', () => resolve(), { once: true });
+    link.addEventListener('error', () => resolve(), { once: true });
+    document.head.appendChild(link);
+  });
+}
+
+/**
+ * Load Mermaid on first use and initialize it once.
+ */
+export function ensureMermaid() {
+  return (_mermaidPromise ??= _loadScript(MERMAID_SRC)
+    .then(() => {
+      if (!window.mermaid) throw new Error('mermaid global missing after load');
+      window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+      return window.mermaid;
+    })
+    .catch((err) => {
+      _mermaidPromise = null;
+      throw err;
+    }));
+}
+
+/**
+ * Load KaTeX (script + stylesheet) on first use.
+ */
+export function ensureKatex() {
+  return (_katexPromise ??= Promise.all([_loadScript(KATEX_SRC), _loadStylesheet(KATEX_CSS)])
+    .then(() => {
+      if (!window.katex) throw new Error('katex global missing after load');
+      return window.katex;
+    })
+    .catch((err) => {
+      _katexPromise = null;
+      throw err;
+    }));
+}
+
+// mdToHtml() is synchronous and its callers insert the returned string into the
+// DOM themselves, so the placeholders are usually not attached yet when this
+// fires. Loading first and scanning afterwards covers that gap: by the time
+// KaTeX is in, the caller's innerHTML assignment has long since happened.
+//
+// setTimeout, not requestAnimationFrame: this has nothing to do with paint, and
+// rAF is throttled to a stop in a background tab (and never fires at all in a
+// headless browser), which would leave math untypeset until the tab is focused.
+function _scheduleMathFlush() {
+  if (_mathFlushScheduled) return;
+  _mathFlushScheduled = true;
+  setTimeout(() => {
+    _mathFlushScheduled = false;
+    ensureKatex()
+      .then(() => renderMath(document))
+      .catch((e) => console.warn('KaTeX load error:', e));
+  }, 0);
+}
 
 function safeLinkUrl(rawUrl) {
   const url = String(rawUrl || '').trim();
@@ -34,21 +157,161 @@ function linkHtml(text, url) {
   return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${safeText}</a>`;
 }
 
+function imageHtml(alt, url, title) {
+  const safeUrl = safeLinkUrl(url);
+  if (!safeUrl || safeUrl.startsWith('#')) return escapeHtml(alt || '');
+  const safeAlt = escapeHtml(alt || '');
+  const safeTitle = title ? ` title="${escapeHtml(title)}"` : '';
+  return `<img src="${escapeHtml(safeUrl)}" alt="${safeAlt}"${safeTitle} loading="lazy" decoding="async">`;
+}
+
+function _isModelEndpointUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''), window.location.origin);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const path = parsed.pathname.replace(/\/+$/, '');
+    return path === '/v1';
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Sanitize the raw-HTML fragments that mdToHtml deliberately preserves from
+ * the source text — <details> blocks (collapsible agent output) and <a> tags
+ * (emitted by the markdown link pass). Those fragments are later restored
+ * verbatim into innerHTML, so without scrubbing them a model — or any content
+ * routed through here — could smuggle in an `<img onerror=...>`, an
+ * `<a href="javascript:...">`, an `onmouseover=` handler, etc. and execute
+ * script in the authenticated page (DOM XSS).
+ *
+ * Parsing into a <template> is inert: assigning to template.innerHTML neither
+ * fetches resources nor runs scripts, so we can walk the resulting tree,
+ * drop script-capable elements, and strip event-handler attributes and
+ * dangerous URL schemes before the (now safe) fragment is handed back.
+ */
+const _ALLOWED_HTML_BAD_TAGS = new Set([
+  'SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META',
+  'STYLE', 'BASE', 'FORM', 'NOSCRIPT', 'TEMPLATE',
+  // Foreign-content roots. SVG/MathML have their own parser rules and are a
+  // classic mutation-XSS vehicle — e.g. an SVG-namespaced <script>, whose
+  // `tagName` is the lower-case 'script' and would slip a name check that
+  // assumed HTML's upper-casing. They aren't needed in the <details>/<a>
+  // fragments we preserve, so drop the whole subtree.
+  'SVG', 'MATH',
+]);
+const _ALLOWED_HTML_URL_ATTRS = new Set([
+  'href', 'src', 'srcset', 'xlink:href', 'action', 'formaction', 'background', 'poster',
+]);
+
+function _compactUrlSchemeValue(value) {
+  return String(value || '').replace(/[\u0000-\u0020\u007f-\u009f]+/g, '').toLowerCase();
+}
+
+function _isDangerousUrl(value) {
+  return /^(javascript|vbscript|data):/.test(_compactUrlSchemeValue(value));
+}
+
+function _isDangerousSrcset(value) {
+  return String(value || '').split(',').some(candidate => _isDangerousUrl(candidate));
+}
+
+function _cleanAllowedHtmlOnce(htmlString) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = htmlString;
+  for (const el of Array.from(tpl.content.querySelectorAll('*'))) {
+    // Upper-case the tag for comparison: HTML tagNames are upper-case, but
+    // SVG/MathML elements preserve their original (lower/camel) case, so a
+    // raw `Set.has(el.tagName)` would miss e.g. a namespaced <script>.
+    if (_ALLOWED_HTML_BAD_TAGS.has(el.tagName.toUpperCase())) {
+      el.remove();
+      continue;
+    }
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      // Drop every inline event handler (onerror, onclick, onmouseover, ...)
+      // and srcdoc (a frame-less script vector).
+      if (name.startsWith('on') || name === 'srcdoc') {
+        el.removeAttribute(attr.name);
+        continue;
+      }
+      if (name === 'style') {
+        const value = _compactUrlSchemeValue(attr.value);
+        if (/javascript:|vbscript:|data:|expression\(/.test(value)) {
+          el.removeAttribute(attr.name);
+        }
+        continue;
+      }
+      // Neutralize javascript:/vbscript:/data: in URL-bearing attributes.
+      // Strip control/space chars first so e.g. "java\tscript:" can't slip by.
+      if (_ALLOWED_HTML_URL_ATTRS.has(name)) {
+        if (name === 'srcset' ? _isDangerousSrcset(attr.value) : _isDangerousUrl(attr.value)) {
+          el.removeAttribute(attr.name);
+        }
+      }
+    }
+  }
+  return tpl.innerHTML;
+}
+
+export function sanitizeAllowedHtml(html) {
+  const raw = String(html == null ? '' : html);
+  // Non-browser context (e.g. a future SSR/Node import): fail closed by
+  // escaping rather than trusting the markup.
+  if (typeof document === 'undefined') return escapeHtml(raw);
+
+  // Sanitize to a fixpoint. Re-parsing the serialized output can mutate the
+  // tree (the basis of mutation-XSS), so re-clean until it stops changing.
+  let out = raw;
+  for (let i = 0; i < 4; i++) {
+    const next = _cleanAllowedHtmlOnce(out);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 /**
  * Check if text has unclosed think tag
  */
 export function hasUnclosedThinkTag(text) {
-  const openCount = (text.match(/<think(?:ing)?>/gi) || []).length;
-  const closeCount = (text.match(/<\/think(?:ing)?>/gi) || []).length;
+  text = normalizeThinkingMarkup(text || '');
+  const openCount =
+    (text.match(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>/gi) || []).length
+    + (text.match(/<\|channel>thought/gi) || []).length;
+  const closeCount =
+    (text.match(/<\/(?:think(?:ing)?|thought)>/gi) || []).length
+    + (text.match(/<channel\|>/gi) || []).length;
   return openCount > closeCount;
 }
 
 export function startsWithReasoningPrefix(text) {
-  return /^\s*(?:thinking(?:\s+process)?\s*:|the user |i need |i should |i will |they are |the question |i can )/i.test(text || '');
+  return /^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |i need |i should |i will |i'll |i am going |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|they are |the question |i can )/i.test(text || '');
+}
+
+export function normalizeThinkingMarkup(text) {
+  if (!text) return text;
+  let normalized = text;
+  // MiniMax M-series can emit namespaced reasoning tags like
+  // <mm:think>...</mm:think>. Normalize them into the shared thinking parser.
+  normalized = normalized.replace(/<mm:think(\s+[^>]*)?>/gi, (_m, attrs = '') => `<think${attrs || ''}>`);
+  normalized = normalized.replace(/<\/mm:think>/gi, '</think>');
+  normalized = normalized.replace(/<thought(\s+[^>]*)?>/gi, (_m, attrs = '') => `<think${attrs || ''}>`);
+  normalized = normalized.replace(/<\/thought>/gi, '</think>');
+  normalized = normalized.replace(/<\|channel>thought\s*\n?([\s\S]*?)<channel\|>\s*/gi, (_m, content = '') => {
+    const thought = String(content || '').trim();
+    return thought ? `<think>${thought}</think>\n` : '';
+  });
+  normalized = normalized.replace(/<\|channel>response\s*\n?([\s\S]*?)<channel\|>/gi, (_m, content = '') => content || '');
+  normalized = normalized.replace(/<\|channel>response\s*\n?/gi, '');
+  normalized = normalized.replace(/<channel\|>/gi, '');
+  return normalized;
 }
 
 function normalizePlainThinking(text) {
-  if (!text || /<think/i.test(text)) return text;
+  if (!text) return text;
+  text = normalizeThinkingMarkup(text);
+  if (/<think/i.test(text)) return text;
 
   const trimmed = text.trimStart();
   if (!startsWithReasoningPrefix(trimmed)) return text;
@@ -92,6 +355,11 @@ function normalizePlainThinking(text) {
       const reply = withoutPrefix.slice(match.index + 1).trim();
       if (thinkBlock && reply) return `<think>${thinkBlock}</think>\n${reply}`;
     }
+  }
+
+  if (/^\s*(?:thinking(?:\s+process)?\s*:|the user |user wants|we need |let me (?:think|look|see|check|read|review|analyze|parse|figure|draft|write)|i need to |i should |i will |i'll |i am going )/i.test(trimmed)) {
+    const thinkBlock = withoutPrefix.trim();
+    if (thinkBlock) return `<think>${thinkBlock}</think>`;
   }
 
   return text;
@@ -142,11 +410,21 @@ export function extractThinkingBlocks(text) {
   // (b) Cut-off mid-generation — there's already real reply text before the
   //     opener. Drop from the tag onward as before (it's truncated thinking).
   if (hasUnclosedThinkTag(normalized)) {
-    const strayOpener = cleanContent.match(/^\s*<think(?:ing)?(?:\s+[^>]*)?>([\s\S]*)$/i);
-    if (strayOpener) {
-      cleanContent = strayOpener[1];
+    const gemmaThoughtStart = cleanContent.search(/<\|channel>thought/i);
+    if (gemmaThoughtStart >= 0) {
+      const leakedThought = cleanContent
+        .slice(gemmaThoughtStart)
+        .replace(/^<\|channel>thought\s*\n?/i, '')
+        .trim();
+      if (gemmaThoughtStart === 0 && leakedThought) thinkingBlocks.push(leakedThought);
+      cleanContent = cleanContent.slice(0, gemmaThoughtStart);
     } else {
-      cleanContent = cleanContent.replace(/<think(?:ing)?(?:\s+[^>]*)?>[\s\S]*$/gi, '');
+      const strayOpener = cleanContent.match(/^\s*<think(?:ing)?(?:\s+[^>]*)?>([\s\S]*)$/i);
+      if (strayOpener) {
+        cleanContent = strayOpener[1];
+      } else {
+        cleanContent = cleanContent.replace(/<think(?:ing)?(?:\s+[^>]*)?>[\s\S]*$/gi, '');
+      }
     }
   }
 
@@ -198,6 +476,17 @@ function createThinkingSection(thinkingContent, index = 0, thinkingTime = null) 
   `;
 }
 
+function createTaskCompletedMarker() {
+  return `
+    <div class="task-completed-marker" role="status" aria-label="Task completed">
+      <span class="task-completed-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </span>
+      <span>Task completed</span>
+    </div>
+  `;
+}
+
 /**
  * Process text and render with thinking sections
  */
@@ -238,8 +527,19 @@ function _useSvgEmoji() {
   return typeof document === 'undefined' || !document.body?.classList.contains('text-emojis');
 }
 
-export function svgifyEmoji(html) {
-  if (!_useSvgEmoji() || !html || !_EMOJI_RE.test(html)) return html;
+// `opts.shortcodes` (default true) controls the issue-#345 `:name:` → emoji
+// expansion. Chat passes it through as true; document/email body renderers pass
+// false so author-typed `:shortcode:` text stays literal (see mdToHtml callers).
+// The Unicode-emoji → monochrome-SVG pass always runs regardless, so a real 😀
+// in a document still renders as the themed line icon as it always has.
+export function svgifyEmoji(html, opts) {
+  if (!_useSvgEmoji() || !html) return html;
+  const allowShortcodes = !opts || opts.shortcodes !== false;
+  // Two reasons to walk the HTML: real Unicode emoji to turn into SVG icons,
+  // or `:shortcode:` text the model emitted instead of an emoji (issue #345).
+  const hasUnicode = _EMOJI_RE.test(html);
+  const hasShortcode = allowShortcodes && hasEmojiShortcode(html);
+  if (!hasUnicode && !hasShortcode) return html;
   const parts = html.split(/(<[^>]*>)/);   // odd indices = tags
   let codeDepth = 0;
   for (let i = 0; i < parts.length; i++) {
@@ -249,7 +549,13 @@ export function svgifyEmoji(html) {
       else if (/^<\/(pre|code)\s*>/.test(t)) codeDepth = Math.max(0, codeDepth - 1);
       continue;
     }
-    if (codeDepth === 0 && _EMOJI_RE.test(parts[i])) parts[i] = _svgifyText(parts[i]);
+    if (codeDepth !== 0) continue;
+    let seg = parts[i];
+    // Expand shortcodes to Unicode first, then both they and any pre-existing
+    // Unicode emoji get rendered as the same monochrome line icons below.
+    if (hasShortcode) seg = replaceEmojiShortcodes(seg);
+    if (_EMOJI_RE.test(seg)) seg = _svgifyText(seg);
+    parts[i] = seg;
   }
   return parts.join('');
 }
@@ -276,6 +582,9 @@ export function processWithThinking(text) {
   const { thinkingBlocks, content, thinkingTime } = extractThinkingBlocks(text);
 
   let html = '';
+  let visibleContent = content || '';
+  const doneOnly = /^\s*\[DONE\]\s*$/i.test(visibleContent);
+  const hadTrailingDone = !doneOnly && /(?:^|\n)\s*\[DONE\]\s*$/i.test(visibleContent);
 
   // Add thinking sections (collapsed by default)
   thinkingBlocks.forEach((block, index) => {
@@ -283,8 +592,12 @@ export function processWithThinking(text) {
   });
 
   // Add the actual content
-  if (content) {
-    html += mdToHtml(content);
+  if (doneOnly) {
+    html += createTaskCompletedMarker();
+  } else {
+    if (hadTrailingDone) visibleContent = visibleContent.replace(/\n?\s*\[DONE\]\s*$/i, '').trimEnd();
+    if (visibleContent) html += mdToHtml(visibleContent);
+    if (hadTrailingDone) html += createTaskCompletedMarker();
   }
 
   return _useSvgEmoji() ? svgifyEmoji(html) : html;
@@ -293,88 +606,18 @@ export function processWithThinking(text) {
 /**
  * Convert markdown to HTML
  */
-export function mdToHtml(src) {
-  // CRITICAL: Extract allowed HTML blocks first (details/summary)
+export function mdToHtml(src, opts) {
   const allowedHtmlBlocks = [];
+  const codeBlocks = [];
+  const inlineCodeBlocks = [];
+  const mermaidBlocks = [];
   let s = (src ?? '');
 
-  // Repair common ways the agent mangles the entity-anchor convention
-  // (`[Name](#kind-<id>)`). Models reliably get the single-link case
-  // right but slip into other formats when listing many in a table.
-  // These regexes upgrade the broken forms to proper markdown links so
-  // the standard `[text](url)` handler below picks them up.
-  const ANCHOR_KIND = '(?:session|document|note|image|email|event|task|skill|research)';
-  // Case A: `[Name] [#kind-id]` — agent put the URL in brackets, often
-  // in a table cell next to the label. Pair them.
-  s = s.replace(
-    new RegExp(`\\[([^\\]\\n]+?)\\]\\s*\\[#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\]`, 'g'),
-    '[$1](#$2)',
-  );
-  // Case B: bare `[#kind-id]` with no preceding label — give it a
-  // generic "→ open" link text so it still renders as a button.
-  s = s.replace(
-    new RegExp(`\\[#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\]`, 'g'),
-    '[→ open](#$1)',
-  );
-  // Case C: bare `#kind-id` in plain text — only when it's word-
-  // boundary delimited and NOT already inside a markdown link or
-  // anchor syntax. Use a lookbehind for `](` or `[` to skip those.
-  s = s.replace(
-    new RegExp(`(^|[^\\[(])#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\b`, 'g'),
-    '$1[#$2](#$2)',
-  );
-
-  // Convert markdown links [text](url) to clickable links
-  // Internal #hash links navigate in-page; external links open in new tab
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
-    return linkHtml(text, url);
-  });
-
-  // Autolink bare URLs (http/https). Skips URLs already inside <a> tags
-  // (placed by markdown link replacement above) and URLs in backticks.
-  s = s.replace(
-    /(^|[\s(<])(https?:\/\/[^\s<>"'`\]]+[^\s<>"'`\].,;:!?])/g,
-    (match, prefix, url) => `${prefix}${linkHtml(url, url)}`
-  );
-
-  // Autolink scheme-less domains the model often emits as plain text
-  // (e.g. "techcrunch.com/ai", "perplexity.ai", "www.wired.com"). The TLD
-  // allowlist keeps it from matching file names / versions ("package.json",
-  // "node.js", "v1.2.3"); the required start/[\s(<] prefix means domains
-  // already inside an http link (preceded by "//") or an email ("@") are
-  // skipped. Trailing sentence punctuation is kept outside the link.
-  s = s.replace(
-    /(^|[\s(<])((?:www\.)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|co|dev|app|gov|edu|news|info|tech|xyz|me)(?:\/[^\s<>"'`\])]*)?)/gi,
-    (match, prefix, domain) => {
-      const trail = (domain.match(/[.,;:!?)]+$/) || [''])[0];
-      const core = trail ? domain.slice(0, -trail.length) : domain;
-      return `${prefix}${linkHtml(core, 'https://' + core)}${trail}`;
-    }
-  );
-
-  // Extract <details>...</details> blocks and replace with placeholders
-  // Default to open so agent output is visible
-  s = s.replace(/<details>([\s\S]*?)<\/details>/gi, (match) => {
-    const placeholder = `___ALLOWED_HTML_${allowedHtmlBlocks.length}___`;
-    allowedHtmlBlocks.push(match.replace(/<details>/i, '<details open>'));
-    return placeholder;
-  });
-
-  // ALSO preserve <a> tags the same way (they're now in the HTML from markdown conversion)
-  s = s.replace(/<a\s+[^>]*>.*?<\/a>/gi, (match) => {
-    const placeholder = `___ALLOWED_HTML_${allowedHtmlBlocks.length}___`;
-    allowedHtmlBlocks.push(match);
-    return placeholder;
-  });
-
-  // Now escape everything else
-  s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  s = s.replace(/\n{3,}/g, '\n\n');
-
-  // CRITICAL: Extract code blocks and replace with placeholders
-  const codeBlocks = [];
-  const mermaidBlocks = [];
+  // Extract fenced code blocks before any markdown/HTML preservation passes.
+  // Otherwise placeholders from the allowed-HTML sanitizer (e.g.
+  // ___ALLOWED_HTML_0___) can leak into quoted HTML/JS samples, because the
+  // placeholder gets captured as literal code content and never restored inside
+  // the final <pre><code> block.
   s = s.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
     const cleaned = code
       .replace(/\r\n/g, '\n')
@@ -405,48 +648,149 @@ export function mdToHtml(src) {
     return placeholder;
   });
 
+  // Extract inline code spans before the link/autolink/HTML passes, mirroring
+  // the fenced-block handling above. A URL inside `inline code` (e.g.
+  // `irm http://127.0.0.1:3000/x`) is preceded by a space, so the bare-URL
+  // autolink matches it, wraps it in an <a> tag, and swaps that for an
+  // ___ALLOWED_HTML_ placeholder — corrupting the command. The old inline-code
+  // pass ran after those passes, too late to protect it.
+  s = s.replace(/`([^`]+?)`/g, (match, code) => {
+    if (code.startsWith('___CODE_BLOCK_') || code.startsWith('___MERMAID_BLOCK_')) return match;
+    const placeholder = `___INLINE_CODE_${inlineCodeBlocks.length}___`;
+    inlineCodeBlocks.push(`<code>${escapeHtml(code)}</code>`);
+    return placeholder;
+  });
+
+  // Repair common ways the agent mangles the entity-anchor convention
+  // (`[Name](#kind-<id>)`). Models reliably get the single-link case
+  // right but slip into other formats when listing many in a table.
+  // These regexes upgrade the broken forms to proper markdown links so
+  // the standard `[text](url)` handler below picks them up.
+  const ANCHOR_KIND = '(?:session|document|note|image|email|event|task|skill|research)';
+  // Case A: `[Name] [#kind-id]` — agent put the URL in brackets, often
+  // in a table cell next to the label. Pair them.
+  s = s.replace(
+    new RegExp(`\\[([^\\]\\n]+?)\\]\\s*\\[#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\]`, 'g'),
+    '[$1](#$2)',
+  );
+  // Case B: bare `[#kind-id]` with no preceding label — give it a
+  // generic "→ open" link text so it still renders as a button.
+  s = s.replace(
+    new RegExp(`\\[#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\]`, 'g'),
+    '[→ open](#$1)',
+  );
+  // Case C: bare `#kind-id` in plain text — only when it's word-
+  // boundary delimited and NOT already inside a markdown link or
+  // anchor syntax. Use a lookbehind for `](` or `[` to skip those.
+  s = s.replace(
+    new RegExp(`(^|[^\\[(])#(${ANCHOR_KIND}-[A-Za-z0-9_-]+)\\b`, 'g'),
+    '$1[#$2](#$2)',
+  );
+  // Legacy search_chats output used bare session hashes (`#<uuid>`). Upgrade
+  // those too so old answers and model summaries remain clickable.
+  s = s.replace(
+    /(^|[^\[(])#([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi,
+    '$1[#session-$2](#session-$2)',
+  );
+
+  // Convert markdown images before links so ![alt](url) does not become
+  // literal "!" plus a normal link.
+  s = s.replace(/!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (match, alt, url, title) => {
+    return imageHtml(alt, url, title);
+  });
+
+  // Convert markdown links [text](url) to clickable links
+  // Internal #hash links navigate in-page; external links open in new tab
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
+    return linkHtml(text, url);
+  });
+
+  // Autolink bare URLs (http/https). Skips URLs already inside <a> tags
+  // (placed by markdown link replacement above) and URLs in backticks.
+  s = s.replace(
+    /(^|[\s(<])(https?:\/\/[^\s<>"'`\]]+[^\s<>"'`\].,;:!?])/g,
+    (match, prefix, url) => `${prefix}${linkHtml(url, url)}`
+  );
+
+  // Autolink scheme-less domains the model often emits as plain text
+  // (e.g. "techcrunch.com/ai", "perplexity.ai", "www.wired.com"). The TLD
+  // allowlist keeps it from matching file names / versions ("package.json",
+  // "node.js", "v1.2.3"); the required start/[\s(<] prefix means domains
+  // already inside an http link (preceded by "//") or an email ("@") are
+  // skipped. Require the TLD to end at a real domain boundary so dotted code
+  // identifiers like `sklearn.metrics` do not link `sklearn.me` and leave
+  // placeholder fragments in the remaining text.
+  s = s.replace(
+    /(^|[\s(<])((?:www\.)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|co|dev|app|gov|edu|news|info|tech|xyz|me)(?=$|[\/\s<>"'`\]).,;:!?])(?:\/[^\s<>"'`\])]*)?)/gi,
+    (match, prefix, domain) => {
+      const trail = (domain.match(/[.,;:!?)]+$/) || [''])[0];
+      const core = trail ? domain.slice(0, -trail.length) : domain;
+      return `${prefix}${linkHtml(core, 'https://' + core)}${trail}`;
+    }
+  );
+
+  // Extract <details>...</details> blocks and replace with placeholders
+  // Default to open so agent output is visible
+  s = s.replace(/<details>([\s\S]*?)<\/details>/gi, (match) => {
+    const placeholder = `___ALLOWED_HTML_${allowedHtmlBlocks.length}___`;
+    allowedHtmlBlocks.push(sanitizeAllowedHtml(match.replace(/<details>/i, '<details open>')));
+    return placeholder;
+  });
+
+  // ALSO preserve <a>/<img> tags the same way (they're now in the HTML from
+  // markdown conversion)
+  s = s.replace(/<(?:a\s+[^>]*>.*?<\/a|img\s+[^>]*?)>/gi, (match) => {
+    const placeholder = `___ALLOWED_HTML_${allowedHtmlBlocks.length}___`;
+    allowedHtmlBlocks.push(sanitizeAllowedHtml(match));
+    return placeholder;
+  });
+
+  // Now escape everything else
+  s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  s = s.replace(/\n{3,}/g, '\n\n');
+
   // KaTeX math rendering (after code blocks are extracted, so math in code is safe)
   const mathBlocks = [];
-  if (window.katex) {
-    // Display math: \[ ... \]  — GPT-style delimiter (gpt-5.x, Claude, etc.).
-    // Handle before $$/$ so all common delimiters render.
-    s = s.replace(/\\\[([\s\S]*?)\\\]/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-    // Inline math: \( ... \)  — GPT-style inline delimiter. Single-line only
-    // ([^\n]) so a stray escaped paren in prose can't swallow across lines.
-    s = s.replace(/\\\(([^\n]*?)\\\)/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-    // Display math: $$...$$
-    s = s.replace(/\$\$([\s\S]*?)\$\$/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: true, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-    // Inline math: $...$  (not preceded/followed by $ or digit, not spanning multiple lines)
-    s = s.replace(/(?<!\$)\$(?!\$)([^\$\n]+?)\$(?!\$)/g, (match, math) => {
-      try {
-        const raw = math.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-        const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
-        mathBlocks.push(katex.renderToString(raw.trim(), { displayMode: false, throwOnError: false }));
-        return placeholder;
-      } catch (e) { return match; }
-    });
-  }
+  let sawPendingMath = false;
+
+  // Typeset straight away when KaTeX is already in, otherwise bank the source in
+  // an inert placeholder for renderMath() to swap once the library lands.
+  const pushMath = (math, displayMode) => {
+    const raw = decodeMathSource(math).trim();
+    const placeholder = `___MATH_BLOCK_${mathBlocks.length}___`;
+    if (window.katex) {
+      mathBlocks.push(katex.renderToString(raw, { displayMode, throwOnError: false }));
+    } else {
+      sawPendingMath = true;
+      mathBlocks.push(`<span class="${MATH_PENDING_CLASS}" data-display="${displayMode}">${escapeHtml(raw)}</span>`);
+    }
+    return placeholder;
+  };
+
+  // Display math: \[ ... \]  — GPT-style delimiter (gpt-5.x, Claude, etc.).
+  // Handle before $$/$ so all common delimiters render.
+  s = s.replace(/\\\[([\s\S]*?)\\\]/g, (match, math) => {
+    try { return pushMath(math, true); } catch (e) { return match; }
+  });
+  // Inline math: \( ... \)  — GPT-style inline delimiter. Single-line only
+  // ([^\n]) so a stray escaped paren in prose can't swallow across lines.
+  s = s.replace(/\\\(([^\n]*?)\\\)/g, (match, math) => {
+    try { return pushMath(math, false); } catch (e) { return match; }
+  });
+  // Display math: $$...$$
+  s = s.replace(/\$\$([\s\S]*?)\$\$/g, (match, math) => {
+    try { return pushMath(math, true); } catch (e) { return match; }
+  });
+  // Inline math: $...$ — single line only, and Pandoc-style delimiter rules so
+  // currency doesn't render as math ("$5 to $10"): the opening $ must be
+  // immediately followed by a non-space, the closing $ must be immediately
+  // preceded by a non-space and not followed by a digit.
+  s = s.replace(/(?<![\$\d])\$(?!\$)(?=\S)([^\$\n]+?)(?<=\S)\$(?!\$|\d)/g, (match, math) => {
+    try { return pushMath(math, false); } catch (e) { return match; }
+  });
+
+  if (sawPendingMath) _scheduleMathFlush();
 
   // Handle pipe tables
   s = s.replace(/(?:^|\n)([^\n]*\|[^\n]*\|[^\n]*)(?:\n([^\n]*\|[^\n]*\|[^\n]*))*/g, (table) => {
@@ -458,16 +802,18 @@ export function mdToHtml(src) {
     let html = '<table style="border-collapse: collapse; width: 100%; margin: 10px 0;">';
 
     rows.forEach((row, idx) => {
-      const cells = row.split('|').filter(cell => cell.trim() !== '');
+      if (idx === 1 && /^[\s|:\-]+$/.test(row)) {
+        html += '<tbody>';
+        return;
+      }
+      const cells = splitTableRow(row);
       if (cells.length === 0) return;
 
-      html += idx === 1 ? '<tbody>' : '';
       html += '<tr>';
 
       cells.forEach(cell => {
         const tag = idx === 0 ? 'th' : 'td';
-        const style = idx === 1 ? 'style="border-top: 2px solid var(--red);"' : '';
-        html += `<${tag} ${style} style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border);">${cell.trim()}</${tag}>`;
+        html += `<${tag} style="padding: 8px; text-align: left; border-bottom: 1px solid var(--border);">${cell.trim()}</${tag}>`;
       });
 
       html += '</tr>';
@@ -475,12 +821,6 @@ export function mdToHtml(src) {
 
     html += '</tbody></table>';
     return html;
-  });
-
-  // Inline code (but not placeholders)
-  s = s.replace(/`([^`]+?)`/g, (match, code) => {
-    if (code.startsWith('___CODE_BLOCK_') || code.startsWith('___ALLOWED_HTML_')) return match;
-    return `<code>${code}</code>`;
   });
 
   // Horizontal rules (must come before bold/italic to avoid * conflicts)
@@ -502,9 +842,20 @@ export function mdToHtml(src) {
   s = s.replace(/^(\d+)\. (.*)$/gm, '<oli>$2</oli>');
   s = s.replace(/(?:^|\n)(<oli>[\s\S]*?)(?=\n(?!<oli>)|$)/g, m => `<ol>${m.trim().replace(/<\/?oli>/g, (t) => t === '<oli>' ? '<li>' : '</li>')}</ol>`);
 
-  // Unordered lists
-  s = s.replace(/^(?:- |\* )(.*)$/gm, '<li>$1</li>');
-  s = s.replace(/(?:^|\n)(<li>[\s\S]*?)(?=\n(?!<li>)|$)/g, m => `<ul>${m.trim()}</ul>`);
+  // GitHub-style task lists (- [ ] / - [x]) → checkbox items. Must run before
+  // the generic unordered-list rule so the "- " prefix isn't consumed first.
+  // Emits <uli> (with a class) so the unordered-list wrapper below treats it
+  // as a list item. Used by plan mode: plan + progress render as a checklist.
+  s = s.replace(/^(?:- |\* )\[([ xX])\] (.*)$/gm, (_m, mark, text) => {
+    const done = mark.toLowerCase() === 'x';
+    return `<uli class="task-item${done ? ' task-done' : ''}"><span class="task-check" aria-hidden="true"></span><span class="task-text">${text}</span></uli>`;
+  });
+
+  // Unordered lists. <uli> may carry attributes (task-item class), so the
+  // wrapper preserves them when converting <uli ...> → <li ...>.
+  s = s.replace(/^(?:- |\* )(.*)$/gm, '<uli>$1</uli>');
+  s = s.replace(/(^|\n)((?:<uli\b[^>]*>[^\n]*<\/uli>(?:\n|$))+)/g, (_, prefix, block) =>
+    `${prefix}<ul>${block.trim().replace(/<uli\b([^>]*)>/g, '<li$1>').replace(/<\/uli>/g, '</li>')}</ul>`);
 
   // Blockquotes
   s = s.replace(/^&gt; (.*)$/gm, '<bq>$1</bq>');
@@ -512,7 +863,7 @@ export function mdToHtml(src) {
     `<blockquote>${m.trim().replace(/<\/?bq>/g, (t) => t === '<bq>' ? '<p>' : '</p>')}</blockquote>`);
 
   // Paragraphs - but NOT for code block placeholders or allowed HTML
-  s = s.replace(/^(?!<h\d|<ul>|<ol>|<li>|<oli>|<pre>|<blockquote>|<bq>|<hr>|___CODE_BLOCK_|___ALLOWED_HTML_|___MATH_BLOCK_|___MERMAID_BLOCK_)([^\n]+)$/gm, '<p>$1</p>');
+  s = s.replace(/^(?!<h\d|<ul>|<ol>|<li|<oli>|<\/li>|<pre>|<blockquote>|<bq>|<hr>|___CODE_BLOCK_|___ALLOWED_HTML_|___MATH_BLOCK_|___MERMAID_BLOCK_)([^\n]+)$/gm, '<p>$1</p>');
 
   // Line breaks within paragraphs
   s = s.replace(/<p>([\s\S]*?)<\/p>/g, (match, content) => {
@@ -524,27 +875,41 @@ export function mdToHtml(src) {
   // Remove empty paragraphs
   s = s.replace(/<p><\/p>/g, '');
 
+  // Every restore below passes a function replacer rather than the block string
+  // itself. With a string replacement, `String.replace` reads `$&`, `` $` ``,
+  // `$'` and `$$` in the *replacement* as substitution patterns, so a restored
+  // block containing them is corrupted: `$&` re-inserts the placeholder, `` $` ``
+  // and `$'` splice in the surrounding document, and `$$` collapses to `$`. Those
+  // sequences are ordinary content in fenced code (`perl -pe 's/x/$& y/'`,
+  // `echo "$$USD"`). A function replacer inserts its return value verbatim.
+
   // CRITICAL: Restore allowed HTML blocks first
   allowedHtmlBlocks.forEach((block, index) => {
-    s = s.replace(`___ALLOWED_HTML_${index}___`, block);
+    s = s.replace(`___ALLOWED_HTML_${index}___`, () => block);
   });
 
   // Restore math blocks
   mathBlocks.forEach((block, index) => {
-    s = s.replace(`___MATH_BLOCK_${index}___`, block);
+    s = s.replace(`___MATH_BLOCK_${index}___`, () => block);
   });
 
   // Restore mermaid diagram blocks
   mermaidBlocks.forEach((block, index) => {
-    s = s.replace(`___MERMAID_BLOCK_${index}___`, block);
+    s = s.replace(`___MERMAID_BLOCK_${index}___`, () => block);
   });
 
   // CRITICAL: Restore code blocks at the end
   codeBlocks.forEach((block, index) => {
-    s = s.replace(`___CODE_BLOCK_${index}___`, block);
+    s = s.replace(`___CODE_BLOCK_${index}___`, () => block);
   });
 
-  return _useSvgEmoji() ? svgifyEmoji(s) : s;
+  // Restore inline code spans last, so placeholders carried inside restored
+  // <a>/allowed-HTML blocks are resolved too.
+  inlineCodeBlocks.forEach((block, index) => {
+    s = s.replace(`___INLINE_CODE_${index}___`, () => block);
+  });
+
+  return _useSvgEmoji() ? svgifyEmoji(s, opts) : s;
 }
 
 /**
@@ -578,44 +943,68 @@ export function renderContent(content) {
 }
 
 /**
- * Initialize any unprocessed Mermaid diagrams in a container (or whole document)
+ * Initialize any unprocessed Mermaid diagrams in a container (or whole document).
+ * Returns a promise so callers can await the (lazy) library load if they need to.
  */
 export function renderMermaid(container) {
-  if (!window.mermaid) return;
-  initMermaid();
   const target = container || document;
-  const pending = target.querySelectorAll('pre.mermaid:not([data-processed])');
-  if (pending.length === 0) return;
-  try {
-    window.mermaid.run({ nodes: pending });
-  } catch (e) {
-    console.warn('Mermaid render error:', e);
-  }
+  if (!target || typeof target.querySelectorAll !== 'function') return Promise.resolve();
+  // Cheap pre-check: no fence on the page means Mermaid is never fetched.
+  if (target.querySelectorAll('pre.mermaid:not([data-processed])').length === 0) return Promise.resolve();
+  return ensureMermaid()
+    .then((mermaid) => {
+      // Re-query after the load: during streaming the renderer replaces the
+      // message body repeatedly, so the nodes seen before the fetch are stale.
+      const nodes = [...target.querySelectorAll('pre.mermaid:not([data-processed])')]
+        .filter((node) => node.isConnected);
+      if (nodes.length === 0) return;
+      return mermaid.run({ nodes });
+    })
+    .catch((e) => { console.warn('Mermaid render error:', e); });
+}
+
+/**
+ * Typeset any math that mdToHtml() had to defer because KaTeX was not loaded
+ * yet. Once KaTeX is in, mdToHtml() renders inline and this finds nothing.
+ */
+export function renderMath(container) {
+  const target = container || document;
+  if (!target || typeof target.querySelectorAll !== 'function') return Promise.resolve();
+  if (target.querySelectorAll('.' + MATH_PENDING_CLASS).length === 0) return Promise.resolve();
+  return ensureKatex()
+    .then((katex) => {
+      target.querySelectorAll('.' + MATH_PENDING_CLASS).forEach((el) => {
+        const displayMode = el.getAttribute('data-display') === 'true';
+        try {
+          el.outerHTML = katex.renderToString(el.textContent || '', { displayMode, throwOnError: false });
+        } catch (e) {
+          // Leave the source visible — readable, just not typeset.
+          el.classList.remove(MATH_PENDING_CLASS);
+        }
+      });
+    })
+    .catch((e) => { console.warn('KaTeX render error:', e); });
 }
 
 const markdownModule = {
   escapeHtml,
   mdToHtml,
+  sanitizeAllowedHtml,
   squashOutsideCode,
   renderContent,
   processWithThinking,
   createCollapsible,
   hasUnclosedThinkTag,
   extractThinkingBlocks,
+  normalizeThinkingMarkup,
   startsWithReasoningPrefix,
-  renderMermaid
+  renderMermaid,
+  renderMath,
+  ensureMermaid,
+  ensureKatex
 };
 
 export default markdownModule;
-
-// Mermaid is loaded async so it cannot delay the app shell.
-function initMermaid() {
-  if (!window.mermaid || window.__odysseusMermaidReady) return;
-  window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
-  window.__odysseusMermaidReady = true;
-}
-window.odysseusInitMermaid = initMermaid;
-initMermaid();
 
 // Persist which thinking sections were expanded across page refreshes.
 // IDs are render-generated (Date.now-based) so we key by a stable hash of
@@ -710,6 +1099,124 @@ document.addEventListener('click', function(e) {
       for (const m of mutations) {
         for (const node of m.addedNodes) {
           if (node.nodeType === 1) _apply(node);
+        }
+      }
+    }).observe(root, { childList: true, subtree: true });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start, { once: true });
+  } else {
+    start();
+  }
+})();
+
+function _endpointNameFromUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return parsed.host || parsed.hostname || 'Model endpoint';
+  } catch (_) {
+    return 'Model endpoint';
+  }
+}
+
+function _appendEndpointAddButtons(root) {
+  if (!root || !root.querySelectorAll) return;
+  const anchors = root.matches?.('a[href]')
+    ? [root]
+    : [...root.querySelectorAll('a[href]')];
+  for (const anchor of anchors) {
+    if (anchor.dataset.endpointAddChecked === '1') continue;
+    anchor.dataset.endpointAddChecked = '1';
+    const href = anchor.getAttribute('href') || '';
+    if (!_isModelEndpointUrl(href)) continue;
+    if (anchor.nextElementSibling?.classList?.contains('model-endpoint-add-btn')) continue;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'model-endpoint-add-btn';
+    btn.dataset.endpointUrl = new URL(href, window.location.origin).href.replace(/\/+$/, '');
+    btn.title = 'Add this OpenAI-compatible endpoint to the model picker';
+    btn.innerHTML = '<span aria-hidden="true">+</span><span>Add to model picker</span>';
+    anchor.insertAdjacentElement('afterend', btn);
+  }
+}
+
+async function _registerEndpointFromButton(btn) {
+  const baseUrl = String(btn?.dataset?.endpointUrl || '').trim();
+  if (!baseUrl || !_isModelEndpointUrl(baseUrl)) return;
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span aria-hidden="true">...</span><span>Adding</span>';
+  try {
+    const existingRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+    if (existingRes.ok) {
+      const endpoints = await existingRes.json();
+      const existing = Array.isArray(endpoints)
+        ? endpoints.find((ep) => String(ep.base_url || '').replace(/\/+$/, '') === baseUrl)
+        : null;
+      if (existing) {
+        btn.classList.add('added');
+        btn.innerHTML = '<span aria-hidden="true">✓</span><span>Already added</span>';
+        window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', { detail: { baseUrl } }));
+        if (window.modelsModule?.refreshModels) window.modelsModule.refreshModels(true);
+        if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
+        uiModule.showToast?.(`Already in model picker: ${existing.name || _endpointNameFromUrl(baseUrl)}`);
+        return;
+      }
+    }
+
+    const parsed = new URL(baseUrl, window.location.origin);
+    const fd = new FormData();
+    fd.append('base_url', baseUrl);
+    fd.append('name', _endpointNameFromUrl(baseUrl));
+    fd.append('model_type', 'llm');
+    fd.append('endpoint_kind', 'auto');
+    fd.append('skip_probe', 'true');
+    if (/^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(parsed.hostname)) {
+      fd.append('container_local', 'true');
+    }
+    const res = await fetch('/api/model-endpoints', {
+      method: 'POST',
+      credentials: 'same-origin',
+      body: fd,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 160) : ''}`);
+    }
+    btn.classList.add('added');
+    btn.innerHTML = '<span aria-hidden="true">✓</span><span>Added</span>';
+    window.dispatchEvent(new CustomEvent('ge:model-endpoints-updated', { detail: { baseUrl } }));
+    if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+    if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
+    uiModule.showToast?.(`Model endpoint added: ${_endpointNameFromUrl(baseUrl)}`);
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = original;
+    uiModule.showError?.(`Add endpoint failed: ${err.message || err}`);
+  }
+}
+
+(function _watchModelEndpointLinks() {
+  if (window._modelEndpointLinkWatcherWired) return;
+  window._modelEndpointLinkWatcherWired = true;
+
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest?.('.model-endpoint-add-btn');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    _registerEndpointFromButton(btn);
+  });
+
+  const start = () => {
+    const root = document.body;
+    if (!root) return;
+    _appendEndpointAddButtons(root);
+    new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        for (const node of m.addedNodes) {
+          if (node.nodeType === 1) _appendEndpointAddButtons(node);
         }
       }
     }).observe(root, { childList: true, subtree: true });

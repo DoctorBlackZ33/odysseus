@@ -5,7 +5,9 @@ A thin wrapper around VectorRAG for backward compatibility and additional featur
 """
 
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+from src.constants import CHROMA_DIR
 
 # Try to import from different possible locations
 try:
@@ -24,19 +26,28 @@ class RAGManager:
     Most methods delegate directly to VectorRAG.
     """
     
-    def __init__(self, persist_directory: str = "data/chroma"):
+    def __init__(self, persist_directory: str = CHROMA_DIR):
         """Initialize the RAGManager with VectorRAG."""
         self.vector_rag = VectorRAG(persist_directory=persist_directory)
         logger.info("RAGManager initialized as wrapper for VectorRAG")
     
     # Delegate all methods to VectorRAG
-    def search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+    def search(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
         """Search for documents - delegates to VectorRAG."""
-        return self.vector_rag.search(query, k)
+        return self.vector_rag.search(query, k, owner=owner)
     
-    def index_personal_documents(self, directory: str) -> Dict[str, Any]:
+    def index_personal_documents(
+        self,
+        directory: str,
+        file_extensions: Optional[set] = None,
+        owner: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Index documents - delegates to VectorRAG."""
-        return self.vector_rag.index_personal_documents(directory)
+        return self.vector_rag.index_personal_documents(
+            directory,
+            file_extensions=file_extensions,
+            owner=owner,
+        )
     
     def retrieve(self, query: str, k: int = 5) -> List[str]:
         """Retrieve relevant chunks - delegates to VectorRAG."""

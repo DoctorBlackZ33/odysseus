@@ -5,14 +5,15 @@ Consolidates the 4+ copies of normalize_base / resolve_endpoint logic into one p
 """
 
 import json
+import ipaddress
 import logging
 import socket
 import subprocess
 from typing import Optional, Tuple, Dict
 from urllib.parse import urlparse, urlunparse
 
-from src.database import SessionLocal, ModelEndpoint
-from src.llm_core import _detect_provider
+from core.database import SessionLocal, ModelEndpoint
+from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +28,138 @@ _NON_CHAT_MODEL = (
 )
 
 
+def endpoint_cost_tracked(url: str, endpoint_kind: Optional[str] = None) -> bool:
+    """Return whether token cost should be tracked for a concrete route.
+
+    This is intentionally a non-secret route classification.  It mirrors the
+    frontend's local/subscription exclusions without exposing endpoint URLs to
+    message metadata.
+    """
+
+    try:
+        parsed = urlparse(url or "")
+        host = (parsed.hostname or "").lower().rstrip(".")
+        path = (parsed.path or "").rstrip("/")
+    except Exception:
+        return False
+    if not host:
+        return False
+    if host == "chatgpt.com" and (
+        path == "/backend-api/codex" or path.startswith("/backend-api/codex/")
+    ):
+        return False
+    kind = str(endpoint_kind or "auto").strip().lower()
+    if kind == "local":
+        return False
+    if kind in {"api", "proxy"}:
+        return True
+    if host in {"localhost", "0.0.0.0", "host.docker.internal"} or host.endswith(".local"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_global
+    except ValueError:
+        pass
+    if "." not in host:
+        return False
+    return True
+
+
 def _first_chat_model(models) -> Optional[str]:
     """First model that isn't an embedding/tts/etc.; falls back to models[0]."""
     for m in (models or []):
         if not any(p in str(m).lower() for p in _NON_CHAT_MODEL):
             return m
     return (models[0] if models else None)
+
+
+def _endpoint_cached_models(ep) -> list:
+    """Return cached model ids from the current or legacy endpoint field."""
+    raw = getattr(ep, "cached_models", None) or getattr(ep, "models", None)
+    if not raw:
+        return []
+    try:
+        models = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+    return models if isinstance(models, list) else []
+
+
+def _endpoint_pinned_models(ep) -> list:
+    raw = getattr(ep, "pinned_models", None)
+    if not raw:
+        return []
+    try:
+        models = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return []
+    return models if isinstance(models, list) else []
+
+
+def _is_mlx_deepseek_v4_repo_id(model_id: str) -> bool:
+    return "mlx-community/deepseek-v4" in str(model_id or "").lower()
+
+
+def _is_mlx_deepseek_v4_shim_id(model_id: str) -> bool:
+    return "/.cache/odysseus/mlx-shims/deepseek-v4" in str(model_id or "").lower()
+
+
+def _filter_mlx_deepseek_v4_repo_when_shimmed(model_ids) -> list:
+    ids = list(model_ids or [])
+    has_shim = any(_is_mlx_deepseek_v4_shim_id(m) for m in ids)
+    if not has_shim:
+        return ids
+    return [m for m in ids if not _is_mlx_deepseek_v4_repo_id(m)]
+
+
+def _endpoint_hidden_models(ep) -> set:
+    """Model ids the admin disabled on this endpoint (the UI's hidden list)."""
+    raw = getattr(ep, "hidden_models", None)
+    if not raw:
+        return set()
+    try:
+        hidden = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return set()
+    return set(hidden) if isinstance(hidden, list) else set()
+
+
+def _endpoint_enabled_models(ep) -> list:
+    """Cached models minus the ones disabled on the endpoint, order preserved.
+
+    The auto-pick fallback must never select a model the user disabled — a
+    Groq endpoint can list 16 models with only 1 enabled, and picking the
+    raw first one resolves to a model that 400s ("requires terms acceptance").
+    """
+    hidden = _endpoint_hidden_models(ep)
+    merged = []
+    seen = set()
+    for m in [*_endpoint_cached_models(ep), *_endpoint_pinned_models(ep)]:
+        if not isinstance(m, str) or not m or m in seen:
+            continue
+        seen.add(m)
+        merged.append(m)
+    merged = _filter_mlx_deepseek_v4_repo_when_shimmed(merged)
+    return [m for m in merged if m not in hidden]
+
+
+def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    """Resolve a ModelEndpoint row to its runtime base URL and bearer/API key.
+
+    Static-key providers use ``ModelEndpoint.api_key``. Session-backed providers
+    store refreshable credentials in ProviderAuthSession and must resolve a
+    current access token at call time.
+    """
+    base = normalize_base(getattr(ep, "base_url", "") or "")
+    api_key = getattr(ep, "api_key", None)
+    auth_id = getattr(ep, "provider_auth_id", None)
+    if auth_id:
+        from src.chatgpt_subscription import resolve_runtime_credentials
+
+        creds = resolve_runtime_credentials(auth_id, owner=owner)
+        base = normalize_base(creds.get("base_url") or base)
+        api_key = creds.get("api_key")
+    return base, api_key
 
 
 # Cache for Tailscale hostname → IP resolution
@@ -98,7 +225,7 @@ def resolve_url(url: str) -> str:
 def normalize_base(url: str) -> str:
     """Strip known API path suffixes from a base URL."""
     url = (url or "").strip().rstrip("/")
-    for suffix in ["/models", "/chat/completions", "/completions", "/v1/messages"]:
+    for suffix in ["/models", "/chat/completions", "/completions", "/v1/messages", "/responses"]:
         if url.endswith(suffix):
             url = url[: -len(suffix)].rstrip("/")
     for suffix in ["/chat", "/tags", "/generate"]:
@@ -107,51 +234,85 @@ def normalize_base(url: str) -> str:
     return url
 
 
+def _validated_endpoint_base(url: str) -> str:
+    """Return a base URL that is safe for endpoint path appends."""
+    base = (url or "").strip().rstrip("/")
+    if "?" in base or "#" in base:
+        raise ValueError("Endpoint base URL must not include query or fragment")
+    return urlunparse(urlparse(base)._replace(query="", fragment="")).rstrip("/")
+
+
+def _prepare_endpoint_base(base: str) -> str:
+    base = _validated_endpoint_base(normalize_base(base))
+    return _validated_endpoint_base(normalize_base(resolve_url(base)))
+
+
+def _append_endpoint_path(base: str, suffix: str) -> str:
+    parsed = urlparse(base)
+    current = (parsed.path or "").rstrip("/")
+    extra = "/" + suffix.lstrip("/")
+    path = f"{current}{extra}" if current else extra
+    return urlunparse(parsed._replace(path=path, query="", fragment=""))
+
+
+def _pathless_host(base: str, host: str) -> bool:
+    parsed = urlparse(base)
+    return (parsed.hostname or "").lower() == host and not (parsed.path or "").strip("/")
+
+
 def _anthropic_api_root(base: str) -> str:
     """Return Anthropic's API root, preserving /v1 for OpenAI-compatible APIs elsewhere."""
     base = (base or "").strip().rstrip("/")
-    host = urlparse(base).hostname or ""
-    if host.endswith("anthropic.com") and base.endswith("/v1"):
+    if _host_match(base, "anthropic.com") and base.endswith("/v1"):
         return base[:-3].rstrip("/")
-    return base
-
-
-def _ollama_api_root(base: str) -> str:
-    """Return the native Ollama API root, adding /api for ollama.com hosts."""
-    base = (base or "").strip().rstrip("/")
-    parsed = urlparse(base)
-    host = parsed.hostname or ""
-    path = (parsed.path or "").rstrip("/")
-    if path.endswith("/api"):
-        return base
-    if host.endswith("ollama.com"):
-        root = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else "https://ollama.com"
-        return root.rstrip("/") + "/api"
     return base
 
 
 def build_chat_url(base: str) -> str:
     """Return the correct chat endpoint URL for a given base."""
-    base = resolve_url(base)
+    base = _prepare_endpoint_base(base)
     provider = _detect_provider(base)
-    host = urlparse(base).hostname or ""
-    if provider == "anthropic" or host.endswith("anthropic.com"):
-        return _anthropic_api_root(base) + "/v1/messages"
-    if provider == "ollama" or host.endswith("ollama.com"):
-        return _ollama_api_root(base) + "/chat"
-    return base + "/chat/completions"
+    if provider == "anthropic":
+        return _append_endpoint_path(_anthropic_api_root(base), "/v1/messages")
+    if provider == "ollama":
+        return _append_endpoint_path(_ollama_api_root(base), "/chat")
+    if provider == "chatgpt-subscription":
+        return _append_endpoint_path(base, "/responses")
+    if _pathless_host(base, "api.openai.com"):
+        base = _append_endpoint_path(base, "/v1")
+    return _append_endpoint_path(base, "/chat/completions")
 
 
-def build_models_url(base: str) -> str:
-    """Return the provider-specific model-list endpoint URL for a base."""
-    base = resolve_url(base)
+def build_models_url(base: str) -> Optional[str]:
+    """Return the provider-specific model-list endpoint URL for a base.
+
+    For OpenAI-compatible servers (LM Studio, llama.cpp, vLLM,
+    text-generation-webui, etc.) the model list is exposed at ``/v1/models``.
+    When the user-supplied base has no path — e.g. ``http://localhost:1234`` —
+    we still need to land on ``/v1/models`` (issue #25); insert the ``/v1``
+    segment only when the path is empty, leaving any explicit non-empty path
+    untouched (so custom prefixes like ``/openai`` or ``/api/openai/v1`` keep
+    their semantics).
+    """
+    base = _prepare_endpoint_base(base)
     provider = _detect_provider(base)
-    host = urlparse(base).hostname or ""
-    if provider == "anthropic" or host.endswith("anthropic.com"):
-        return _anthropic_api_root(base) + "/v1/models"
-    if provider == "ollama" or host.endswith("ollama.com"):
-        return _ollama_api_root(base) + "/tags"
-    return base + "/models"
+    if provider == "anthropic":
+        return _append_endpoint_path(_anthropic_api_root(base), "/v1/models")
+    if provider == "ollama":
+        return _append_endpoint_path(_ollama_api_root(base), "/tags")
+    if provider == "chatgpt-subscription":
+        return None
+    # Generic OpenAI-compatible fallback: local model servers with no explicit
+    # path conventionally expose `/v1/models` (LM Studio, llama.cpp, vLLM).
+    # For non-local unknown hosts, do not invent `/v1`; append `/models` to the
+    # caller's base so look-alike provider hosts stay generic.
+    parsed = urlparse(base)
+    host = (parsed.hostname or "").lower()
+    is_local = host in {"localhost", "127.0.0.1", "::1", "host.docker.internal"}
+    uses_v1_models_by_default = is_local or host in {"api.deepseek.com", "api.openai.com"}
+    if not parsed.path and uses_v1_models_by_default:
+        base = _append_endpoint_path(base, "/v1")
+    return _append_endpoint_path(base, "/models")
 
 
 def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
@@ -163,11 +324,19 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
             headers["x-api-key"] = api_key
         headers["anthropic-version"] = "2023-06-01"
         return headers
+    if provider == "copilot":
+        from src.copilot import copilot_headers
+        return copilot_headers(api_key)
+    if provider == "chatgpt-subscription":
+        from src.chatgpt_subscription import chatgpt_headers
+        return chatgpt_headers(api_key)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     if provider == "openrouter":
-        headers.setdefault("HTTP-Referer", "https://github.com/pewdiepie-archdaemon/odysseus")
+        headers.setdefault("HTTP-Referer", "https://github.com/odysseus-dev/odysseus")
         headers.setdefault("X-OpenRouter-Title", "Odysseus")
+    if _is_kimi_code_url(base):
+        headers.setdefault("User-Agent", KIMI_CODE_USER_AGENT)
     return headers
 
 
@@ -196,24 +365,29 @@ def resolve_endpoint(
     except Exception:
         return fallback_url, fallback_model, fallback_headers
 
-    ep_id = (get_user_setting(f"{setting_prefix}_endpoint_id", owner or "", settings.get(f"{setting_prefix}_endpoint_id", "")) or "").strip()
-    model = (get_user_setting(f"{setting_prefix}_model", owner or "", settings.get(f"{setting_prefix}_model", "")) or "").strip()
+    owner_str = owner or ""
+    def _stg(key: str) -> str:
+        return (get_user_setting(key, owner_str, settings.get(key, "")) or "").strip()
 
-    # Unset Utility means "same as Default Chat Model". This keeps background
-    # features usable out of the box and lets users override Utility only when
-    # they explicitly want a separate cheaper/faster model.
-    if setting_prefix == "utility" and not ep_id:
-        ep_id = (get_user_setting("default_endpoint_id", owner or "", settings.get("default_endpoint_id", "")) or "").strip()
-        model = (get_user_setting("default_model", owner or "", settings.get("default_model", "")) or "").strip()
+    ep_id = _stg(f"{setting_prefix}_endpoint_id")
+    model = _stg(f"{setting_prefix}_model")
 
     # Fall back to utility model for task/research/auto-naming if not specifically configured.
-    # If Utility itself is unset, the block above makes that resolve to Default Chat.
-    if not ep_id and setting_prefix != "utility":
-        ep_id = (get_user_setting("utility_endpoint_id", owner or "", settings.get("utility_endpoint_id", "")) or "").strip()
-        model = (get_user_setting("utility_model", owner or "", settings.get("utility_model", "")) or "").strip()
-        if not ep_id:
-            ep_id = (get_user_setting("default_endpoint_id", owner or "", settings.get("default_endpoint_id", "")) or "").strip()
-            model = (get_user_setting("default_model", owner or "", settings.get("default_model", "")) or "").strip()
+    if not ep_id and setting_prefix not in ("utility", "default"):
+        ep_id = _stg("utility_endpoint_id")
+        model = _stg("utility_model")
+
+    # If the endpoint is STILL not configured, but the caller provided a
+    # valid fallback (e.g. the active session model), use that immediately.
+    # This prevents background tasks from jumping to the global default_model
+    # when the user is mid-conversation with a different model.
+    if not ep_id and fallback_url and fallback_model:
+        return fallback_url, fallback_model, fallback_headers
+
+    # Unset Utility (or anything else that didn't have a fallback) means "same as Default Chat Model".
+    if not ep_id:
+        ep_id = _stg("default_endpoint_id")
+        model = _stg("default_model")
 
     if not ep_id:
         return fallback_url, fallback_model, fallback_headers
@@ -232,18 +406,25 @@ def resolve_endpoint(
         if not ep:
             return fallback_url, fallback_model, fallback_headers
 
-        base = normalize_base(ep.base_url)
+        try:
+            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+        except Exception as e:
+            logger.warning("Could not resolve endpoint runtime credentials: %s", e)
+            return fallback_url, fallback_model, fallback_headers
         chat_url = build_chat_url(base)
-        headers = build_headers(ep.api_key, base)
+        headers = build_headers(api_key, base)
 
-        # If no model specified, try to pick the first from endpoint's cached list
-        if not model and hasattr(ep, 'models') and ep.models:
-            try:
-                models = json.loads(ep.models) if isinstance(ep.models, str) else ep.models
-                if models:
-                    model = _first_chat_model(models)
-            except Exception:
-                pass
+        # Discard a configured model the user has since disabled on the
+        # endpoint (e.g. a stale `default_model` left pointing at a now-hidden
+        # model). Treat it as unset so the picker below selects a live one
+        # instead of dispatching to a disabled model that 400s.
+        if model and model in _endpoint_hidden_models(ep):
+            model = ""
+        # If no (usable) model specified, pick the first enabled chat model.
+        if not model:
+            model = _first_chat_model(_endpoint_enabled_models(ep)) or ""
+        if not model and not fallback_model:
+            logger.warning('[resolve_endpoint] no usable model (all models hidden or list empty)')
 
         return chat_url, model or fallback_model, headers
     except Exception as e:
@@ -253,10 +434,14 @@ def resolve_endpoint(
         db.close()
 
 
-def resolve_endpoint_by_id(
-    ep_id: str, model: Optional[str] = None
-) -> Optional[Tuple[str, str, Dict]]:
-    """Resolve a specific endpoint id (+ optional model) to (chat_url, model, headers).
+def _resolve_endpoint_by_id_with_descriptor(
+    ep_id: str,
+    model: Optional[str] = None,
+    owner: Optional[str] = None,
+    *,
+    require_exact_model: bool = False,
+) -> Optional[Tuple[Tuple[str, str, Dict], dict]]:
+    """Resolve a concrete endpoint/model plus its non-secret descriptor.
 
     Returns None if the endpoint doesn't exist or is disabled. Used to turn
     a configured fallback entry ({endpoint_id, model}) into a dispatch target.
@@ -265,26 +450,52 @@ def resolve_endpoint_by_id(
         return None
     db = SessionLocal()
     try:
-        ep = db.query(ModelEndpoint).filter(
+        q = db.query(ModelEndpoint).filter(
             ModelEndpoint.id == ep_id,
             ModelEndpoint.is_enabled == True,
-        ).first()
+        )
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        ep = q.first()
         if not ep:
             return None
-        base = normalize_base(ep.base_url)
+        try:
+            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+        except Exception as e:
+            logger.warning("Could not resolve endpoint runtime credentials: %s", e)
+            return None
         chat_url = build_chat_url(base)
-        headers = build_headers(ep.api_key, base)
+        headers = build_headers(api_key, base)
         m = (model or "").strip()
-        if not m and getattr(ep, "models", None):
-            try:
-                models = json.loads(ep.models) if isinstance(ep.models, str) else ep.models
-                if models:
-                    m = _first_chat_model(models) or ""
-            except Exception:
-                pass
+        enabled_models = _endpoint_enabled_models(ep)
+        if require_exact_model:
+            # Explicit foreground fallback entries are concrete choices. A
+            # hidden or known-missing model must disable the entry instead of
+            # silently substituting another model from the endpoint.
+            if not m or m in _endpoint_hidden_models(ep):
+                return None
+            if enabled_models and m not in enabled_models:
+                return None
+        else:
+            # Legacy Utility/Vision chains retain their model-repair behavior.
+            if m and m in _endpoint_hidden_models(ep):
+                m = ""
+            if not m:
+                m = _first_chat_model(enabled_models) or ""
         if not m:
             return None
-        return chat_url, m, headers
+        return (
+            (chat_url, m, headers),
+            {
+                "endpoint_id": ep.id,
+                "endpoint_label": getattr(ep, "name", None) or ep.id,
+                "endpoint_cost_tracked": endpoint_cost_tracked(
+                    chat_url,
+                    getattr(ep, "endpoint_kind", None),
+                ),
+            },
+        )
     except Exception as e:
         logger.debug(f"Could not resolve endpoint {ep_id}: {e}")
         return None
@@ -292,45 +503,170 @@ def resolve_endpoint_by_id(
         db.close()
 
 
-def resolve_chat_fallback_candidates() -> list:
-    """Build the configured default-chat fallback chain as a list of
-    (chat_url, model, headers) tuples, skipping any that can't resolve.
+def resolve_endpoint_by_id(
+    ep_id: str,
+    model: Optional[str] = None,
+    owner: Optional[str] = None,
+    *,
+    require_exact_model: bool = False,
+) -> Optional[Tuple[str, str, Dict]]:
+    """Resolve a specific endpoint id (+ optional model) to its runtime route."""
 
-    The primary model is NOT included — callers prepend their session's
-    current (url, model, headers) so per-session model overrides are honored.
+    resolved = _resolve_endpoint_by_id_with_descriptor(
+        ep_id,
+        model,
+        owner=owner,
+        require_exact_model=require_exact_model,
+    )
+    return resolved[0] if resolved else None
+
+
+def resolve_route_descriptor(
+    endpoint_url: str,
+    model: str,
+    headers: Optional[Dict] = None,
+    owner: Optional[str] = None,
+) -> dict:
+    """Return the visible endpoint identity for an already-resolved route.
+
+    Headers are compared only inside the process so two endpoints using the
+    same provider URL/model but different credentials remain distinguishable.
+    No credential material is returned or logged.
     """
-    return _resolve_fallback_candidates("default_model_fallbacks")
+
+    if not endpoint_url or not model:
+        return {
+            "endpoint_id": None,
+            "endpoint_label": "Selected route",
+            "endpoint_cost_tracked": endpoint_cost_tracked(endpoint_url),
+        }
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        expected = (endpoint_url.rstrip("/"), model, headers or {})
+        for ep in q.all():
+            resolved = _resolve_endpoint_by_id_with_descriptor(
+                ep.id,
+                model,
+                owner=owner,
+                require_exact_model=True,
+            )
+            if not resolved:
+                continue
+            candidate, descriptor = resolved
+            actual = (candidate[0].rstrip("/"), candidate[1], candidate[2] or {})
+            if actual == expected:
+                return descriptor
+    except Exception as e:
+        logger.debug("Could not identify selected endpoint route: %s", e)
+    finally:
+        db.close()
+    return {
+        "endpoint_id": None,
+        "endpoint_label": "Selected route",
+        "endpoint_cost_tracked": endpoint_cost_tracked(endpoint_url),
+    }
+
+
+def resolve_route_descriptor_by_id(
+    endpoint_id: str,
+    endpoint_url: str,
+    model: str,
+    headers: Optional[Dict] = None,
+    owner: Optional[str] = None,
+) -> Optional[dict]:
+    """Resolve a selected route's identity without relying on row order.
+
+    The explicit endpoint id is still verified against the resolved runtime
+    route. This prevents stale or mismatched request metadata from being used
+    for attribution while disambiguating endpoints whose routes are otherwise
+    identical.
+    """
+
+    resolved = _resolve_endpoint_by_id_with_descriptor(
+        endpoint_id,
+        model,
+        owner=owner,
+        require_exact_model=True,
+    )
+    if not resolved:
+        return None
+    candidate, descriptor = resolved
+    expected = ((endpoint_url or "").rstrip("/"), model, headers or {})
+    actual = (candidate[0].rstrip("/"), candidate[1], candidate[2] or {})
+    return descriptor if actual == expected else None
 
 
 def resolve_utility_fallback_candidates(owner: Optional[str] = None) -> list:
     """Configured fallback chain for the Utility model (`utility_model_fallbacks`)."""
-    try:
-        from src.settings import get_user_setting, load_settings
-        settings = load_settings()
-        if not (get_user_setting("utility_endpoint_id", owner or "", settings.get("utility_endpoint_id", "")) or "").strip():
-            return _resolve_fallback_candidates("default_model_fallbacks", owner=owner)
-    except Exception:
-        pass
     return _resolve_fallback_candidates("utility_model_fallbacks", owner=owner)
 
 
-def resolve_vision_fallback_candidates() -> list:
+def resolve_vision_fallback_candidates(owner: Optional[str] = None) -> list:
     """Configured fallback chain for the Vision model (`vision_model_fallbacks`)."""
-    return _resolve_fallback_candidates("vision_model_fallbacks")
+    return _resolve_fallback_candidates("vision_model_fallbacks", owner=owner)
 
 
 def _resolve_fallback_candidates(setting_key: str, owner: Optional[str] = None) -> list:
-    out = []
     try:
         from src.settings import get_user_setting, load_settings
         settings = load_settings()
         chain = get_user_setting(setting_key, owner or "", settings.get(setting_key) or []) or []
     except Exception:
-        return out
-    for entry in chain:
+        return []
+    return resolve_fallback_entries(chain, owner=owner)
+
+
+def resolve_fallback_entries(
+    entries,
+    owner: Optional[str] = None,
+    *,
+    require_exact_model: bool = False,
+) -> list:
+    """Resolve ordered endpoint/model entries within the caller's owner scope."""
+
+    out = []
+    for entry in entries or []:
         if not isinstance(entry, dict):
             continue
-        resolved = resolve_endpoint_by_id(entry.get("endpoint_id", ""), entry.get("model", ""))
-        if resolved:
+        resolved = resolve_endpoint_by_id(
+            entry.get("endpoint_id", ""),
+            entry.get("model", ""),
+            owner=owner,
+            require_exact_model=require_exact_model,
+        )
+        if resolved and resolved not in out:
             out.append(resolved)
+    return out
+
+
+def resolve_fallback_entries_with_descriptors(
+    entries,
+    owner: Optional[str] = None,
+    *,
+    require_exact_model: bool = False,
+) -> list:
+    """Resolve ordered entries while retaining safe endpoint provenance."""
+
+    out = []
+    seen = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        resolved = _resolve_endpoint_by_id_with_descriptor(
+            entry.get("endpoint_id", ""),
+            entry.get("model", ""),
+            owner=owner,
+            require_exact_model=require_exact_model,
+        )
+        if not resolved:
+            continue
+        candidate, descriptor = resolved
+        if any(candidate == prior for prior in seen):
+            continue
+        seen.append(candidate)
+        out.append((candidate, descriptor))
     return out

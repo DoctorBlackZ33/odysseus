@@ -23,8 +23,10 @@
  * @returns {{x: number, y: number, guides: Array}}
  */
 export function computeSnap(layer, nx, ny, ctx) {
-  const SNAP_PX = 6 / Math.max(ctx.zoom, 0.0001);
-  const cw = ctx.canvasW, ch = ctx.canvasH;
+  if (!layer || !layer.canvas || !ctx) return { x: nx, y: ny, guides: [] };
+  const zoom = Number.isFinite(Number(ctx.zoom)) ? Number(ctx.zoom) : 1;
+  const SNAP_PX = 6 / Math.max(zoom, 0.0001);
+  const cw = Number(ctx.canvasW) || 0, ch = Number(ctx.canvasH) || 0;
   const w = layer.canvas.width, h = layer.canvas.height;
 
   const vTargets = [
@@ -37,7 +39,8 @@ export function computeSnap(layer, nx, ny, ctx) {
     { y: ch, label: 'canvas-b' },
     { y: ch / 2, label: 'canvas-cy' },
   ];
-  for (const other of ctx.otherLayers) {
+  const otherLayers = Array.isArray(ctx.otherLayers) ? ctx.otherLayers : [];
+  for (const other of otherLayers) {
     if (!other.visible || other.id === layer.id) continue;
     const o = other.offset || { x: 0, y: 0 };
     const ow = other.canvas.width, oh = other.canvas.height;

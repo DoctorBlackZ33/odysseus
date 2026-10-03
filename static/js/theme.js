@@ -4,6 +4,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import { initColorPickers, attachColorPicker } from './colorPicker.js';
+import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 
@@ -25,7 +26,7 @@ export const THEMES = {
   gpt:        { bg:'#212121', fg:'#ececec', panel:'#171717', border:'#424242', red:'#949494',
                 advanced: { sendBtnBg: '#949494', sendBtnHover: '#7f7f7f',
                             userBubbleBg: '#2f2f2f', aiBubbleBg: '#171717',
-                            inputBg: '#2f2f2f' } },
+                            inputBg: '#2f2f2f', brandColor: '#ffffff', brandMixTo: '#ffffff' } },
   claude:     { bg:'#262624', fg:'#f5f4f0', panel:'#30302e', border:'#4a4a47', red:'#c6613f' },
   cute:       { bg:'#fff0f5', fg:'#d4608a', panel:'#fff8fa', border:'#f0c0d0', red:'#ff6b9d' },
 };
@@ -38,6 +39,7 @@ const FONT_MAP = {
   mono: "'Fira Code', monospace",
   sans: "system-ui, -apple-system, 'Segoe UI', sans-serif",
   serif: "Georgia, 'Times New Roman', serif",
+  opendyslexic: "'OpenDyslexic', sans-serif",
 };
 const DEFAULT_FONT = 'mono';
 const DEFAULT_DENSITY = 'comfortable';
@@ -128,10 +130,10 @@ function _syncCustomThemesToServer(ct) {
 
 // --- Syntax color derivation from theme base colors ---
 function hexToHSL(hex) {
-  hex = hex.replace('#', '');
-  const r = parseInt(hex.substring(0, 2), 16) / 255;
-  const g = parseInt(hex.substring(2, 4), 16) / 255;
-  const b = parseInt(hex.substring(4, 6), 16) / 255;
+  const rgb = hexToRgb(hex) || { r: 0, g: 0, b: 0 };
+  const r = rgb.r / 255;
+  const g = rgb.g / 255;
+  const b = rgb.b / 255;
   const max = Math.max(r, g, b), min = Math.min(r, g, b);
   let h, s, l = (max + min) / 2;
   if (max === min) { h = s = 0; }
@@ -183,6 +185,7 @@ const ADV_KEYS = [
   { key: 'bubbleBorder',       css: '--bubble-border',     label: 'Border Chat Bubble', group: 'Chat Bubbles' },
   { key: 'sidebarBg',          css: '--sidebar-bg',        label: 'Sidebar Bg',       group: 'Sidebar' },
   { key: 'brandColor',         css: '--brand-color',       label: 'Odysseus Logo',    group: 'Sidebar' },
+  { key: 'brandMixTo',         css: '--brand-mix-to',      label: 'Logo Gradient End', group: 'Sidebar' },
   { key: 'hamburgerColor',     css: '--hamburger-color',   label: 'Hamburger Menu',   group: 'Sidebar' },
   { key: 'inputBg',            css: '--input-bg',          label: 'Input Bg',         group: 'Chat Input / Prompt Area' },
   { key: 'inputBorder',        css: '--input-border',      label: 'Input Border',     group: 'Chat Input / Prompt Area' },
@@ -202,6 +205,7 @@ function computeAdvancedDefaults(colors) {
     bubbleBorder: colors.border,
     sidebarBg: colors.panel,
     brandColor: red,
+    brandMixTo: colors.fg,
     hamburgerColor: colors.fg,
     inputBg: colors.panel,
     inputBorder: colors.border,
@@ -382,6 +386,20 @@ export function applyFontDensity(font, density) {
   document.documentElement.style.setProperty('--font-family', family);
   document.documentElement.classList.remove('density-compact', 'density-spacious');
   if (d !== 'comfortable') document.documentElement.classList.add('density-' + d);
+}
+
+// UI text-size scale (accessibility). Global and independent of the active
+// theme, so the chosen size persists across theme switches. Stored as a plain
+// percentage string ('100' | '110' | '125' | '150').
+const UI_SCALE_KEY = 'odysseus-ui-scale';
+const DEFAULT_UI_SCALE = '100';
+
+export function applyUiScale(scale) {
+  const s = scale || DEFAULT_UI_SCALE;
+  // Only one non-default scale ('125'). Remove any legacy classes too so an
+  // older stored value can't leave a stale zoom applied.
+  document.documentElement.classList.remove('ui-scale-110', 'ui-scale-125', 'ui-scale-140');
+  if (s === '125') document.documentElement.classList.add('ui-scale-125');
 }
 
 const _BG_CLASSES = ['bg-pattern-dots',
@@ -1130,6 +1148,18 @@ export function initThemeUI() {
       const s = getSaved(); if (s) _saveFull(s.name, s.colors);
     });
   }
+  const textSizeSelect = document.getElementById('theme-text-size-select');
+  if (textSizeSelect) {
+    const nts = textSizeSelect.cloneNode(true); textSizeSelect.parentNode.replaceChild(nts, textSizeSelect);
+    let initScale = DEFAULT_UI_SCALE;
+    try { initScale = localStorage.getItem(UI_SCALE_KEY) || DEFAULT_UI_SCALE; } catch (e) {}
+    nts.value = initScale;
+    applyUiScale(initScale);
+    nts.addEventListener('change', () => {
+      applyUiScale(nts.value);
+      try { localStorage.setItem(UI_SCALE_KEY, nts.value); } catch (e) {}
+    });
+  }
   if (patternSelect) {
     const np = patternSelect.cloneNode(true); patternSelect.parentNode.replaceChild(np, patternSelect);
     np.value = _initPattern;
@@ -1495,6 +1525,9 @@ function _initSynapse() {
   const canvas = document.createElement('canvas');
   canvas.id = 'synapse-canvas';
   canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1588,6 +1621,9 @@ function _initRain() {
   const canvas = document.createElement('canvas');
   canvas.id = 'rain-canvas';
   canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1660,6 +1696,9 @@ function _initConstellations() {
   const canvas = document.createElement('canvas');
   canvas.id = 'constellations-canvas';
   canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1763,6 +1802,9 @@ function _initPerlinFlow() {
   const canvas = document.createElement('canvas');
   canvas.id = 'perlin-flow-canvas';
   canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1785,8 +1827,7 @@ function _initPerlinFlow() {
     if (bg !== _cachedBg) {
       _cachedBg = bg;
       // Parse hex to rgb for rgba fade
-      const h = bg.replace('#', '');
-      const r = parseInt(h.substring(0, 2), 16), g = parseInt(h.substring(2, 4), 16), b = parseInt(h.substring(4, 6), 16);
+      const { r, g, b } = hexToRgb(bg) || { r: 0, g: 0, b: 0 };
       _fadeStyle = `rgba(${r},${g},${b},0.02)`;
     }
     return _fadeStyle;
@@ -1818,6 +1859,9 @@ function _initPetals() {
   const canvas = document.createElement('canvas');
   canvas.id = 'petals-canvas';
   canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1872,6 +1916,9 @@ function _initSparkles() {
   const canvas = document.createElement('canvas');
   canvas.id = 'sparkles-canvas';
   canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1927,6 +1974,9 @@ function _initEmbers() {
   const canvas = document.createElement('canvas');
   canvas.id = 'embers-canvas';
   canvas.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;';
+  // Decorative background effect — hide from assistive tech so screen readers
+  // don't announce an empty canvas and axe's "region" rule doesn't flag it.
+  canvas.setAttribute('aria-hidden', 'true');
   document.body.prepend(canvas);
   const ctx = canvas.getContext('2d');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -1961,9 +2011,8 @@ function _initEmbers() {
     return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#c9a95a';
   }
   function rgba(hex, a) {
-    const h = hex.replace('#', '');
-    const n = parseInt(h, 16);
-    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+    const { r, g, b } = hexToRgb(hex) || { r: 0, g: 0, b: 0 };
+    return `rgba(${r},${g},${b},${a})`;
   }
   function draw() {
     if (!document.body.classList.contains('bg-pattern-embers')) {

@@ -2,6 +2,7 @@
 """Multi-provider TTS service — dispatches to local Kokoro, OpenAI-compatible API, or browser."""
 
 import io
+import os
 import wave
 import logging
 import hashlib
@@ -9,7 +10,21 @@ import httpx
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from src.constants import TTS_CACHE_DIR
+
 logger = logging.getLogger(__name__)
+
+
+def _safe_speed(value, default: float = 1.0) -> float:
+    """Parse the stored tts_speed defensively. The settings layer tolerates
+    corrupt/agent-written config, so a non-numeric or empty value (e.g. an agent
+    setting "speech speed" = "fast", or a hand-edited settings.json) must not
+    crash synthesis or the stats endpoint with a ValueError."""
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return speed if speed > 0 else default
 
 
 class TTSService:
@@ -23,10 +38,15 @@ class TTSService:
       "endpoint:<id>"   — OpenAI-compatible /audio/speech via ModelEndpoint
     """
 
-    def __init__(self, cache_dir: str = "data/tts_cache"):
+    def __init__(self, cache_dir: str = TTS_CACHE_DIR):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._kokoro = None  # lazy-init
+        
+        try:
+            self.max_cache_bytes = int(os.getenv("ODYSSEUS_TTS_CACHE_MAX_BYTES", 500 * 1024 * 1024))
+        except ValueError:
+            self.max_cache_bytes = 500 * 1024 * 1024
 
     # ── Settings ──
 
@@ -34,6 +54,7 @@ class TTSService:
         from src.settings import load_settings
         saved = load_settings()
         return {
+            "tts_enabled": saved.get("tts_enabled", True),
             "tts_provider": saved.get("tts_provider", "disabled"),
             "tts_model": saved.get("tts_model", "tts-1"),
             "tts_voice": saved.get("tts_voice", "alloy"),
@@ -43,6 +64,8 @@ class TTSService:
     @property
     def available(self) -> bool:
         settings = self._load_settings()
+        if settings.get("tts_enabled") is False:
+            return False
         provider = settings["tts_provider"]
         if provider == "disabled":
             return False
@@ -51,7 +74,7 @@ class TTSService:
         if provider == "local":
             kokoro = self._get_kokoro()
             return kokoro is not None and kokoro.available
-        if provider.startswith("endpoint:"):
+        if isinstance(provider, str) and provider.startswith("endpoint:"):
             return True  # assume reachable; errors surface at synthesis time
         return False
 
@@ -71,6 +94,53 @@ class TTSService:
     def _put_cache(self, key: str, data: bytes):
         ext = ".mp3" if (len(data) >= 3 and (data[:3] == b'ID3' or (data[0] == 0xff and (data[1] & 0xe0) == 0xe0))) else ".wav"
         (self.cache_dir / f"{key}{ext}").write_bytes(data)
+
+        self._enforce_cache_limit()
+
+    def _enforce_cache_limit(self):
+            """Evicts oldest files if the cache exceeds the configured byte limit."""
+            if self.max_cache_bytes <= 0:
+                return
+
+            try:
+                files = []
+                total_size = 0
+
+                # Safely scan files and sum sizes, ignoring files deleted mid-scan
+                for f in self.cache_dir.iterdir():
+                    try:
+                        if f.is_file() and f.suffix.lower() in (".mp3", ".wav"):
+                            files.append(f)
+                            total_size += f.stat().st_size
+                    except OSError:
+                        continue
+
+                if total_size > self.max_cache_bytes:
+                    logger.info(
+                        f"TTS cache ({total_size} bytes) exceeded limit ({self.max_cache_bytes} bytes). Evicting oldest files."
+                    )
+
+                    # Sort files by modification time (oldest first)
+                    try:
+                        files.sort(key=lambda f: f.stat().st_mtime)
+                    except OSError as e:
+                        logger.warning(f"Failed to sort cache files by mtime: {e}")
+
+                    # Trim down to 80% of max capacity
+                    target_size = self.max_cache_bytes * 0.8
+
+                    while files and total_size > target_size:
+                        f = files.pop(0)
+                        try:
+                            size = f.stat().st_size
+                            f.unlink()
+                            total_size -= size
+                        except OSError as e:
+                            logger.warning(f"Failed to evict cache file {f}: {e}")
+                            continue
+
+            except Exception as e:
+                logger.warning(f"Error enforcing TTS cache limit: {e}", exc_info=True)
 
     def clear_cache(self):
         count = 0
@@ -128,10 +198,12 @@ class TTSService:
 
     def synthesize(self, text: str, use_cache: bool = True) -> Optional[bytes]:
         settings = self._load_settings()
+        if settings.get("tts_enabled") is False:
+            return None
         provider = settings["tts_provider"]
         model = settings["tts_model"]
         voice = settings["tts_voice"]
-        speed = float(settings.get("tts_speed", "1"))
+        speed = _safe_speed(settings.get("tts_speed", "1"))
 
         if provider in ("disabled", "browser"):
             return None
@@ -183,7 +255,7 @@ class TTSService:
         provider = settings["tts_provider"]
         tts_enabled = settings.get("tts_enabled", True)
 
-        cache_files = list(self.cache_dir.glob("*.wav"))
+        cache_files = list(self.cache_dir.glob("*.wav")) + list(self.cache_dir.glob("*.mp3"))
         cache_size = sum(f.stat().st_size for f in cache_files)
 
         is_available = self.available and tts_enabled
@@ -193,7 +265,7 @@ class TTSService:
             "provider": provider,
             "model": settings["tts_model"],
             "voice": settings["tts_voice"],
-            "speed": float(settings.get("tts_speed", "1")),
+            "speed": _safe_speed(settings.get("tts_speed", "1")),
             "cache_entries": len(cache_files),
             "cache_size_mb": round(cache_size / (1024 * 1024), 2),
         }

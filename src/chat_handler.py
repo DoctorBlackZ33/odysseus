@@ -14,7 +14,7 @@ from src.constants import (
     UPLOAD_DIR,
 )
 from core.models import ChatMessage
-from src.chat_helpers import extract_urls, is_vision_model
+from src.chat_helpers import extract_urls, model_supports_vision
 from src.document_processor import build_user_content, analyze_image_with_vl_result
 from src.youtube_handler import (
     is_youtube_url,
@@ -27,6 +27,34 @@ from src.youtube_handler import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_upload_vision_to_gallery(file_info: Dict[str, Any], owner: Optional[str], text: str) -> None:
+    file_hash = (file_info or {}).get("hash")
+    if not file_hash or not text:
+        return
+    try:
+        from core.database import GalleryImage, SessionLocal
+        db = SessionLocal()
+        try:
+            q = db.query(GalleryImage).filter(
+                GalleryImage.file_hash == file_hash,
+                GalleryImage.is_active == True,  # noqa: E712
+            )
+            if owner:
+                q = q.filter(GalleryImage.owner == owner)
+            img = q.first()
+            if not img:
+                return
+            img.caption = text.strip()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to sync upload vision text to gallery: %s", e)
 
 
 class ChatHandler:
@@ -98,6 +126,7 @@ class ChatHandler:
         att_ids: List[str],
         sess,
         auto_opened_docs: Optional[List[Dict[str, Any]]] = None,
+        allow_tool_preprocessing: bool = True,
     ) -> tuple:
         """
         Common preprocessing for both chat endpoints.
@@ -112,7 +141,7 @@ class ChatHandler:
         attachment_meta: List[Dict[str, Any]] = []
 
         # Extract URLs and process YouTube transcripts
-        urls = extract_urls(enhanced_message)
+        urls = extract_urls(enhanced_message) if allow_tool_preprocessing else []
         youtube_transcripts: List[str] = []
 
         has_youtube = False
@@ -143,22 +172,18 @@ class ChatHandler:
         if has_youtube:
             youtube_transcripts.insert(0, YOUTUBE_INSTRUCTION_PROMPT)
 
-        # Analyze images — skip if vision disabled, or if main model is vision-capable
-        from src.settings import get_setting
-        vision_enabled = get_setting("vision_enabled", True)
-        main_is_vision = is_vision_model(sess.model or "")
-
         # Resolve uploads once with the session owner. Attachment IDs are
         # bearer-like references; never trust them without an owner check.
         files_by_id: Dict[str, Dict] = {}
         owner = getattr(sess, "owner", None)
-        if att_ids:
-            for att_id in att_ids:
+        effective_att_ids = att_ids if allow_tool_preprocessing else []
+        if effective_att_ids:
+            for att_id in effective_att_ids:
                 fi = self.upload_handler.resolve_upload(att_id, owner=owner)
                 if fi:
                     files_by_id[att_id] = fi
 
-            for att_id in att_ids:
+            for att_id in effective_att_ids:
                 fi = files_by_id.get(att_id)
                 if fi:
                     attachment_meta.append({
@@ -166,13 +191,30 @@ class ChatHandler:
                         "name": fi.get("name") or fi.get("original_name") or fi["id"],
                         "mime": fi.get("mime", ""),
                         "size": fi.get("size", 0),
+                        "checksum_sha256": fi.get("checksum_sha256") or fi.get("hash"),
+                        "created_at": fi.get("created_at") or fi.get("uploaded_at"),
                         "width": fi.get("width"),
                         "height": fi.get("height"),
                     })
 
-        if att_ids and vision_enabled:
+        # Analyze images only when attachment preprocessing is actually
+        # allowed. The vision capability check can probe local model endpoints,
+        # so guide-only/no-tools turns must not reach it.
+        vision_enabled = False
+        main_is_vision = False
+        if effective_att_ids:
+            from src.settings import get_setting
+            vision_enabled = get_setting("vision_enabled", True)
+            if vision_enabled:
+                main_is_vision = await asyncio.to_thread(
+                    model_supports_vision,
+                    sess.model or "",
+                    getattr(sess, "endpoint_url", "") or "",
+                )
+
+        if effective_att_ids and vision_enabled:
             meta_by_id = {m["id"]: m for m in attachment_meta}
-            for att_id in att_ids:
+            for att_id in effective_att_ids:
                 file_info = files_by_id.get(att_id)
                 if file_info and self.upload_handler.is_image_file(
                     file_info["name"], file_info.get("mime", "")
@@ -195,6 +237,7 @@ class ChatHandler:
                                     _vtext = _vf.read().strip()
                                 if _vtext:
                                     enhanced_message += f"\n[User-corrected caption / OCR for this image — treat as authoritative]:\n{_vtext}"
+                                    _sync_upload_vision_to_gallery(file_info, owner, _vtext)
                                     _m = meta_by_id.get(att_id)
                                     if _m is not None:
                                         _m["vision"] = _vtext
@@ -214,10 +257,11 @@ class ChatHandler:
                                     cached_desc = _vf.read().strip()
                                 if cached_desc and not cached_desc.startswith("["):
                                     vl_desc = cached_desc
+                                    _sync_upload_vision_to_gallery(file_info, owner, vl_desc)
                             except Exception:
                                 vl_desc = None
                         if not vl_desc:
-                            vl_result = analyze_image_with_vl_result(file_info["path"])
+                            vl_result = analyze_image_with_vl_result(file_info["path"], owner=owner)
                             vl_desc = vl_result.get("text", "")
                             vl_model = vl_result.get("model", "")
                             if vl_desc and not vl_desc.startswith("["):
@@ -225,6 +269,7 @@ class ChatHandler:
                                     os.makedirs(os.path.join(UPLOAD_DIR, ".vision"), exist_ok=True)
                                     with open(_vcache, "w", encoding="utf-8") as _vf:
                                         _vf.write(vl_desc)
+                                    _sync_upload_vision_to_gallery(file_info, owner, vl_desc)
                                 except Exception:
                                     pass
                         enhanced_message = f"{enhanced_message}\n\n[Image: {file_info['name']}]\n{vl_desc}"
@@ -237,7 +282,7 @@ class ChatHandler:
                             _m["vision_model"] = vl_model
 
         user_content = build_user_content(
-            enhanced_message, att_ids, UPLOAD_DIR, self.upload_handler,
+            enhanced_message, effective_att_ids, UPLOAD_DIR, self.upload_handler,
             session_id=getattr(sess, "id", None),
             auto_opened_docs=auto_opened_docs,
             owner=owner,

@@ -125,7 +125,7 @@ const TOOL_GROUPS = {
   'Knowledge': ['web_search', 'read_file', 'manage_memory', 'manage_rag', 'search_chats'],
   'Code': ['bash', 'python', 'write_file'],
   'Documents': ['create_document', 'edit_document', 'update_document', 'suggest_document'],
-  'AI & Models': ['chat_with_model', 'second_opinion', 'ask_teacher', 'pipeline', 'list_models', 'generate_image'],
+  'AI & Models': ['chat_with_model', 'ask_teacher', 'pipeline', 'list_models', 'generate_image'],
   'System': ['manage_session', 'manage_endpoints', 'manage_mcp', 'manage_settings', 'manage_skills', 'manage_webhooks', 'manage_tokens', 'manage_documents', 'create_session', 'list_sessions', 'send_to_session', 'ui_control'],
 };
 
@@ -180,7 +180,7 @@ function _renderSettingsBody(body, data, tzList) {
       <div class="assistant-field">
         <span style="display:flex;align-items:center;gap:8px;">Personality
           <select id="assistant-character-pick" style="font-size:11px;padding:1px 6px;border:1px solid var(--border);border-radius:3px;background:var(--bg);color:var(--fg);max-width:180px;">
-            <option value="">-- pick from character --</option>
+            <option value="">-- pick from persona --</option>
           </select>
         </span>
         <textarea id="assistant-personality" rows="6" placeholder="Describe the assistant's personality, tone, and behavior...">${_esc(crew.personality || '')}</textarea>
@@ -293,7 +293,7 @@ function _renderSettingsBody(body, data, tzList) {
           allPresets.push(...presetsRaw);
         }
         const allTemplates = Array.isArray(templates) ? templates : [];
-        let opts = '<option value="">-- pick from character --</option>';
+        let opts = '<option value="">-- pick from persona --</option>';
         if (allPresets.length) {
           opts += '<optgroup label="Presets">';
           for (const p of allPresets) {
@@ -304,7 +304,7 @@ function _renderSettingsBody(body, data, tzList) {
           opts += '</optgroup>';
         }
         if (allTemplates.length) {
-          opts += '<optgroup label="Characters">';
+          opts += '<optgroup label="Personas">';
           for (const t of allTemplates) {
             if (!t.system_prompt && !t.personality) continue;
             const name = t.character_name || t.name || 'Unnamed';

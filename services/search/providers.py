@@ -4,17 +4,16 @@ import json
 import logging
 import os
 from typing import List, Optional
+from urllib.parse import urljoin, urlparse, parse_qs
 
 import httpx
 from bs4 import BeautifulSoup
 
-from src.constants import SEARXNG_INSTANCE
+from src.constants import SEARXNG_INSTANCE, REQUEST_TIMEOUT, WEB_FETCH_USER_AGENT
 from .analytics import RateLimitError, error_logger
 from .query import build_enhanced_query
 
 logger = logging.getLogger(__name__)
-
-REQUEST_TIMEOUT = 20
 
 # Provider registry — maps setting value to (label, needs_key, needs_url)
 PROVIDER_INFO = {
@@ -63,7 +62,17 @@ def _get_provider_key(provider: str) -> str:
         if val:
             return val
     # Legacy fallback: old shared search_api_key field
-    return (settings.get("search_api_key") or "").strip()
+    legacy = (settings.get("search_api_key") or "").strip()
+    if legacy:
+        return legacy
+    env_map = {
+        "brave": "DATA_BRAVE_API_KEY",
+        "google_pse": "GOOGLE_API_KEY",
+        "tavily": "TAVILY_API_KEY",
+        "serper": "SERPER_API_KEY",
+    }
+    env_name = env_map.get(provider, "")
+    return (os.environ.get(env_name) or "").strip() if env_name else ""
 
 
 def _get_result_count() -> int:
@@ -73,6 +82,43 @@ def _get_result_count() -> int:
         return int(settings.get("search_result_count", 5))
     except (ValueError, TypeError):
         return 5
+
+
+# Canonical SafeSearch levels: "strict" (default), "moderate", "off".
+# Each provider has its own knob name and value space -- see _safesearch_for(...).
+_SAFESEARCH_LEVELS = ("strict", "moderate", "off")
+
+
+def _get_safesearch_level() -> str:
+    """Return configured SafeSearch level normalized to a canonical value."""
+    settings = _get_search_settings()
+    raw = (settings.get("search_safesearch") or "strict").strip().lower()
+    if raw in _SAFESEARCH_LEVELS:
+        return raw
+    aliases = {
+        "on": "strict", "high": "strict", "2": "strict",
+        "medium": "moderate", "1": "moderate", "default": "moderate",
+        "none": "off", "disabled": "off", "0": "off",
+    }
+    return aliases.get(raw, "strict")
+
+
+def _safesearch_for(provider: str) -> Optional[str]:
+    """Translate the canonical SafeSearch level into provider-specific values."""
+    level = _get_safesearch_level()
+    if provider == "searxng":
+        return {"strict": "2", "moderate": "1", "off": "0"}[level]
+    if provider == "brave":
+        return level
+    if provider == "duckduckgo_lib":
+        return {"strict": "on", "moderate": "moderate", "off": "off"}[level]
+    if provider == "duckduckgo_html":
+        return {"strict": "1", "moderate": "-1", "off": "-2"}[level]
+    if provider == "google_pse":
+        return None if level == "off" else "active"
+    if provider == "serper":
+        return None if level == "off" else "active"
+    return None
 
 
 # ── SearXNG ──
@@ -86,12 +132,13 @@ _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "i
 _GENERAL_ENGINES = os.environ.get("SEARXNG_GENERAL_ENGINES", "bing,mojeek,presearch")
 
 
-def searxng_search_api(query: str, count: int = 10, categories: str = "general",
+def searxng_search_api(query: str, count: Optional[int] = None, categories: str = "general",
                        time_filter: Optional[str] = None) -> List[dict]:
     """Search using SearXNG JSON API. Returns list of {title, url, snippet}."""
+    count = count if count is not None else _get_result_count()
     instance = _get_search_instance()
     api_key = ""
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": WEB_FETCH_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     # News/fresh queries do badly in the 'general' category — it favours
@@ -104,7 +151,12 @@ def searxng_search_api(query: str, count: int = 10, categories: str = "general",
     # languages and brand-ambiguous terms bleed in foreign SEO pages (e.g.
     # "Odyssey" → Honda Japan, "Trojan" → Japanese malware blogs, "Polyphemus"
     # → Chinese math forums). The news path already did this; general didn't.
-    params = {"q": query, "format": "json", "language": "en"}
+    params = {
+        "q": query,
+        "format": "json",
+        "language": "en",
+        "safesearch": _safesearch_for("searxng"),
+    }
     q_lc = query.lower()
     is_news = time_filter is not None or any(h in q_lc for h in _NEWS_HINTS)
     if is_news and categories == "general":
@@ -153,6 +205,7 @@ def searxng_search_api(query: str, count: int = 10, categories: str = "general",
                 "format": "json",
                 "language": "en",
                 "categories": "general",
+                "safesearch": _safesearch_for("searxng"),
             }
             if _GENERAL_ENGINES:
                 fallback["engines"] = _GENERAL_ENGINES
@@ -197,13 +250,13 @@ def searxng_search(query, max_results=10):
     """Search using SearXNG instance - parsing HTML."""
     instance = _get_search_instance()
     api_key = ""
-    req_headers = {"User-Agent": "Mozilla/5.0"}
+    req_headers = {"User-Agent": WEB_FETCH_USER_AGENT}
     if api_key:
         req_headers["Authorization"] = f"Bearer {api_key}"
     try:
         response = httpx.get(
             f"{instance}/search",
-            params={"q": query},
+            params={"q": query, "safesearch": _safesearch_for("searxng")},
             headers=req_headers,
             timeout=10,
         )
@@ -228,8 +281,9 @@ def searxng_search(query, max_results=10):
 
 # ── Brave ──
 
-def brave_search(query: str, count: int = 10, time_filter: Optional[str] = None) -> List[dict]:
+def brave_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
     """Search using Brave API with key from admin settings or env var."""
+    count = count if count is not None else _get_result_count()
     api_key = _get_provider_key("brave") or os.environ.get("DATA_BRAVE_API_KEY") or ""
     return _brave_search_impl(query, count, time_filter, search_config={"brave_api_key": api_key})
 
@@ -248,7 +302,11 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
         return []
 
     headers = {"X-Subscription-Token": brave_api_key, "Accept": "application/json"}
-    params = {"q": enhanced_query, "count": count}
+    params = {
+        "q": enhanced_query,
+        "count": count,
+        "safesearch": _safesearch_for("brave"),
+    }
     if time_filter:
         time_map = {"day": "day", "week": "week", "month": "month", "year": "year"}
         if time_filter in time_map:
@@ -297,14 +355,41 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
 
 # ── DuckDuckGo (free, no key) ──
 
-def duckduckgo_search(query: str, count: int = 10, time_filter: Optional[str] = None) -> List[dict]:
+def _is_duckduckgo_host(host: str) -> bool:
+    """True only for duckduckgo.com and its subdomains."""
+    host = (host or "").lower()
+    return host == "duckduckgo.com" or host.endswith(".duckduckgo.com")
+
+
+def _resolve_ddg_redirect(raw: str) -> str:
+    """Resolve a DuckDuckGo /l/?uddg= redirect URL to its destination."""
+    if not raw:
+        return raw
+    resolved = raw
+    if resolved.startswith("//"):
+        resolved = "https:" + resolved
+    elif resolved.startswith("/"):
+        resolved = urljoin("https://html.duckduckgo.com", resolved)
+    try:
+        parsed = urlparse(resolved)
+        if _is_duckduckgo_host(parsed.hostname) and parsed.path.rstrip("/") == "/l":
+            qs = parse_qs(parsed.query)
+            if "uddg" in qs:
+                return qs["uddg"][0]
+    except Exception:
+        pass
+    return resolved
+
+
+def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
     """Search using DuckDuckGo via the duckduckgo-search library. No API key needed."""
+    count = count if count is not None else _get_result_count()
     def _html_fallback() -> List[dict]:
         try:
             response = httpx.get(
                 "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0"},
+                params={"q": query, "kp": _safesearch_for("duckduckgo_html")},
+                headers={"User-Agent": WEB_FETCH_USER_AGENT},
                 timeout=REQUEST_TIMEOUT,
             )
             response.raise_for_status()
@@ -314,7 +399,7 @@ def duckduckgo_search(query: str, count: int = 10, time_filter: Optional[str] = 
                 link = result.select_one(".result__a")
                 if not link:
                     continue
-                url = link.get("href", "")
+                url = _resolve_ddg_redirect(link.get("href", ""))
                 if not url:
                     continue
                 snippet_el = result.select_one(".result__snippet")
@@ -330,7 +415,7 @@ def duckduckgo_search(query: str, count: int = 10, time_filter: Optional[str] = 
             return []
 
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
         logger.warning("duckduckgo-search package not installed; using HTML fallback")
         return _html_fallback()
@@ -342,7 +427,12 @@ def duckduckgo_search(query: str, count: int = 10, time_filter: Optional[str] = 
 
     try:
         ddgs = DDGS()
-        raw = ddgs.text(query, max_results=count, timelimit=timelimit)
+        raw = ddgs.text(
+            query,
+            max_results=count,
+            timelimit=timelimit,
+            safesearch=_safesearch_for("duckduckgo_lib"),
+        )
         results = []
         for item in raw:
             url = item.get("href", "")
@@ -362,7 +452,7 @@ def duckduckgo_search(query: str, count: int = 10, time_filter: Optional[str] = 
 
 # ── Google Programmable Search Engine ──
 
-def google_pse_search(query: str, count: int = 10, time_filter: Optional[str] = None) -> List[dict]:
+def google_pse_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
     """Search using Google PSE (Custom Search JSON API).
 
     Requires two keys in settings:
@@ -370,6 +460,7 @@ def google_pse_search(query: str, count: int = 10, time_filter: Optional[str] = 
       - google_pse_cx: Programmable Search Engine ID (cx)
     Or env vars GOOGLE_API_KEY and GOOGLE_PSE_CX.
     """
+    count = count if count is not None else _get_result_count()
     settings = _get_search_settings()
     api_key = _get_provider_key("google_pse") or os.environ.get("GOOGLE_API_KEY", "")
     cx = (settings.get("google_pse_cx") or "").strip() or os.environ.get("GOOGLE_PSE_CX", "")
@@ -384,6 +475,9 @@ def google_pse_search(query: str, count: int = 10, time_filter: Optional[str] = 
         "q": query,
         "num": min(count, 10),  # Google PSE max is 10 per request
     }
+    safe = _safesearch_for("google_pse")
+    if safe:
+        params["safe"] = safe
     if time_filter:
         # dateRestrict: d[number], w[number], m[number], y[number]
         time_map = {"day": "d1", "week": "w1", "month": "m1", "year": "y1"}
@@ -399,12 +493,17 @@ def google_pse_search(query: str, count: int = 10, time_filter: Optional[str] = 
         if response.status_code == 429:
             raise RateLimitError("Google PSE rate limit hit")
         response.raise_for_status()
-        data = response.json()
     except httpx.RequestError as e:
         error_logger.error(f"Google PSE search failed: {e}")
         return []
     except RateLimitError as e:
         error_logger.error(str(e))
+        return []
+
+    try:
+        data = response.json()
+    except json.JSONDecodeError as e:
+        error_logger.error(f"Google PSE returned invalid JSON: {e}")
         return []
 
     results = []
@@ -424,8 +523,9 @@ def google_pse_search(query: str, count: int = 10, time_filter: Optional[str] = 
 
 # ── Tavily ──
 
-def tavily_search(query: str, count: int = 10, time_filter: Optional[str] = None) -> List[dict]:
+def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
     """Search using Tavily API. Requires search_api_key or TAVILY_API_KEY env var."""
+    count = count if count is not None else _get_result_count()
     api_key = _get_provider_key("tavily") or os.environ.get("TAVILY_API_KEY", "")
     if not api_key:
         logger.warning("Tavily: no API key configured")
@@ -451,12 +551,17 @@ def tavily_search(query: str, count: int = 10, time_filter: Optional[str] = None
         if response.status_code == 429:
             raise RateLimitError("Tavily rate limit hit")
         response.raise_for_status()
-        data = response.json()
     except httpx.RequestError as e:
         error_logger.error(f"Tavily search failed: {e}")
         return []
     except RateLimitError as e:
         error_logger.error(str(e))
+        return []
+
+    try:
+        data = response.json()
+    except json.JSONDecodeError as e:
+        error_logger.error(f"Tavily returned invalid JSON: {e}")
         return []
 
     results = []
@@ -477,8 +582,9 @@ def tavily_search(query: str, count: int = 10, time_filter: Optional[str] = None
 
 # ── Serper.dev ──
 
-def serper_search(query: str, count: int = 10, time_filter: Optional[str] = None) -> List[dict]:
+def serper_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
     """Search using Serper.dev API. Requires search_api_key or SERPER_API_KEY env var."""
+    count = count if count is not None else _get_result_count()
     api_key = _get_provider_key("serper") or os.environ.get("SERPER_API_KEY", "")
     if not api_key:
         logger.warning("Serper: no API key configured")
@@ -488,6 +594,9 @@ def serper_search(query: str, count: int = 10, time_filter: Optional[str] = None
         "q": query,
         "num": count,
     }
+    safe = _safesearch_for("serper")
+    if safe:
+        payload["safe"] = safe
     if time_filter:
         time_map = {"day": "qdr:d", "week": "qdr:w", "month": "qdr:m", "year": "qdr:y"}
         if time_filter in time_map:
@@ -503,12 +612,17 @@ def serper_search(query: str, count: int = 10, time_filter: Optional[str] = None
         if response.status_code == 429:
             raise RateLimitError("Serper rate limit hit")
         response.raise_for_status()
-        data = response.json()
     except httpx.RequestError as e:
         error_logger.error(f"Serper search failed: {e}")
         return []
     except RateLimitError as e:
         error_logger.error(str(e))
+        return []
+
+    try:
+        data = response.json()
+    except json.JSONDecodeError as e:
+        error_logger.error(f"Serper returned invalid JSON: {e}")
         return []
 
     results = []

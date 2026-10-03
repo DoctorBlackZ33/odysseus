@@ -11,14 +11,27 @@ import logging
 import re
 from typing import List, Optional
 
+import httpx
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.memory.skills import SkillsManager
 from src.auth_helpers import get_current_user
+from src.prompt_security import untrusted_context_message
 from core.middleware import require_admin
 
 logger = logging.getLogger(__name__)
+
+# Last-resort verdict extraction from a teacher/verifier model's prose (run when
+# JSON parsing fails). `["\'\s:]*` already consumes whitespace, so the original
+# trailing `\s*` made two adjacent \s-matching quantifiers that backtrack O(n^2)
+# on a `verdict` + whitespace flood in untrusted model output (CodeQL
+# py/polynomial-redos). Without it a single unbounded quantifier remains — the
+# matched text is identical, and the scan is linear.
+_VERDICT_PROSE_RE = re.compile(
+    r'verdict["\'\s:]*["\']?(pass|needs_work|fail|inconclusive)', re.I
+)
 
 
 class SkillAddRequest(BaseModel):
@@ -51,6 +64,10 @@ class SkillAddRequest(BaseModel):
     steps: List[str] = Field(default_factory=list)
 
 
+class SkillImportUrlRequest(BaseModel):
+    url: str = Field(..., min_length=8, max_length=2000)
+
+
 class SkillUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
@@ -79,6 +96,8 @@ def _skill_test_task(skill: dict) -> str:
     an email); if we just hand over the 'when to use' text the agent has nothing
     to work on and stalls asking for input. So we tell it to create its own
     realistic fixture first, then apply the skill end-to-end."""
+    if not isinstance(skill, dict):
+        skill = {}
     ctx = (skill.get("when_to_use") or skill.get("description") or skill.get("name") or "").strip()
     return (
         "Test this skill end-to-end. FIRST, set up a small realistic scenario it "
@@ -87,6 +106,23 @@ def _skill_test_task(skill: dict) -> str:
         "example yourself. THEN apply the skill fully to that example and show the "
         "result. Context for when this skill is used: " + (ctx or "(general)")
     )
+
+
+def _skill_test_messages(md: str, task: str) -> list[dict]:
+    """Keep user-editable skill text out of the trusted system role."""
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are TESTING a skill. Follow the supplied reusable procedure "
+                "to complete the user's task for real, using available tools step "
+                "by step. If the skill is wrong, unclear, or references tools that "
+                "do not exist, do your best; the problems will be reviewed afterward."
+            ),
+        },
+        untrusted_context_message("skill under test", md),
+        {"role": "user", "content": task},
+    ]
 
 
 async def _eval_skill_run(skill_md: str, task: str, transcript: str,
@@ -188,7 +224,7 @@ async def _eval_skill_run(skill_md: str, task: str, transcript: str,
         # Last resort: pull the verdict keyword straight out of the prose so a
         # clearly-decided run isn't thrown away as "unparseable".
         if v not in _VERDICTS:
-            km = _re.search(r'verdict["\'\s:]*\s*["\']?(pass|needs_work|fail|inconclusive)', text, _re.I)
+            km = _VERDICT_PROSE_RE.search(text)
             if km:
                 v = km.group(1).lower()
                 if data is None:
@@ -310,6 +346,8 @@ def _should_check_retrieval_precision(skill: dict) -> bool:
         "installation", "install", "system", "ssh", "document", "documents",
         "search", "email", "calendar", "gpu", "server", "python",
     }
+    if not isinstance(skill, dict):
+        return False
     tags = {str(t or "").strip().lower() for t in (skill.get("tags") or [])}
     if tags & broad:
         return True
@@ -391,7 +429,21 @@ async def _eval_skill_retrieval_precision(skill_md: str, others: list,
 _skill_test_jobs: dict = {}
 
 
-async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, skills_manager=None):
+async def _run_skill_test_job(
+    key,
+    name,
+    md,
+    task,
+    url,
+    model,
+    headers,
+    owner,
+    skills_manager=None,
+    *,
+    messages=None,
+    transcript=None,
+    exact_approval=None,
+):
     """Background coroutine: run the skill in an agent loop, capture a condensed
     log + transcript, then have the judge grade it. Writes into _skill_test_jobs."""
     import json as _json
@@ -401,7 +453,7 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
     if job is None:
         return
     log = job["log"]
-    transcript = []
+    transcript = transcript if isinstance(transcript, list) else []
     say_buf = []
 
     def _flush_say():
@@ -409,18 +461,12 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
             log.append({"type": "say", "text": "".join(say_buf)})
             say_buf.clear()
 
-    messages = [
-        {"role": "system", "content":
-            "You are TESTING a skill. Below is a reusable skill (a procedure). Follow it "
-            "to complete the user's task for real, using your available tools, step by "
-            "step. If the skill is wrong, unclear, or references tools that don't exist, "
-            "do your best — the problems will be reviewed afterward.\n\n=== SKILL ===\n" + md},
-        {"role": "user", "content": task},
-    ]
+    messages = list(messages) if isinstance(messages, list) else _skill_test_messages(md, task)
     try:
         async for chunk in stream_agent_loop(
             url, model, messages, headers=headers,
             temperature=0.3, max_tokens=0, max_rounds=8, owner=owner,
+            exact_approval=exact_approval,
         ):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
@@ -438,8 +484,25 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
             elif d.get("type") == "tool_output":
                 _flush_say()
                 out = str(d.get("output") or "")[:600]
-                log.append({"type": "tool_output", "output": out})
+                tool_log = {"type": "tool_output", "output": out}
+                approval = d.get("ask_user")
+                if isinstance(approval, dict):
+                    tool_log["ask_user"] = approval
+                log.append(tool_log)
                 transcript.append(f"[output] {out}\n")
+                if (
+                    isinstance(approval, dict)
+                    and approval.get("kind") == "tool_approval"
+                    and approval.get("approval_id")
+                ):
+                    # Manual skill tests have their own polling UI instead of a
+                    # chat session. Pause the run and retain only server-side
+                    # continuation state until the same owner approves/denies
+                    # this exact sealed action.
+                    job["status"] = "awaiting_approval"
+                    job["approval"] = approval
+                    job["_transcript"] = transcript
+                    return
             elif d.get("type") == "agent_step":
                 _flush_say()
                 log.append({"type": "agent_step", "round": d.get("round")})
@@ -451,6 +514,9 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
         _flush_say()
         log.append({"type": "error", "error": str(e)})
 
+    job.pop("approval", None)
+    job.pop("_transcript", None)
+    job.pop("_run", None)
     log.append({"type": "evaluating"})
     try:
         job["verdict"] = await _eval_skill_run(md, task, "".join(transcript), url, model, headers)
@@ -463,13 +529,13 @@ async def _run_skill_test_job(key, name, md, task, url, model, headers, owner, s
     if skills_manager is not None:
         v = (job["verdict"] or {}).get("verdict") or "unknown"
         try:
-            skills_manager.set_audit(name, v, by_teacher=False, worker_model=model)
+            skills_manager.set_audit(name, v, by_teacher=False, worker_model=model, owner=owner)
         except Exception:
             pass
         conf = {"pass": 0.95, "needs_work": 0.6, "fail": 0.4}.get(v)
         if conf is not None:
             try:
-                skills_manager.update_skill(name, {"confidence": conf})
+                skills_manager.update_skill(name, {"confidence": conf}, owner=owner)
             except Exception:
                 pass
     job["status"] = "done"
@@ -563,6 +629,7 @@ def _skill_duplicate_blocker(skills_manager, name: str, owner) -> Optional[str]:
                 False,
                 [keeper_name],
                 f"Lower-priority duplicate of {keeper_name}",
+                owner=owner,
             )
         except Exception:
             pass
@@ -629,7 +696,7 @@ def _audit_finalize_status(skills_manager, name: str, owner, verdict: str,
     if generic_reason:
         necessary = False
         try:
-            skills_manager.set_necessity(name, False, [], generic_reason)
+            skills_manager.set_necessity(name, False, [], generic_reason, owner=owner)
         except Exception:
             pass
     duplicate_of = _skill_duplicate_blocker(skills_manager, name, owner) if verdict == "pass" else None
@@ -638,7 +705,7 @@ def _audit_finalize_status(skills_manager, name: str, owner, verdict: str,
     c = float(confidence or 0.0)
     status = "published" if (auto_publish and necessary and verdict == "pass" and c >= min_conf) else "draft"
     try:
-        skills_manager.update_skill(name, {"status": status})
+        skills_manager.update_skill(name, {"status": status}, owner=owner)
     except Exception:
         pass
     return status
@@ -662,7 +729,7 @@ def _apply_skill_md(skills_manager, name: str, md: str, owner) -> bool:
             "teacher_model": sk.teacher_model, "owner": sk.owner or owner,
             "when_to_use": sk.when_to_use, "procedure": sk.procedure,
             "pitfalls": sk.pitfalls, "verification": sk.verification, "body_extra": sk.body_extra,
-        }))
+        }, owner=owner))
     except Exception as e:
         logger.warning(f"Audit: could not save edited skill {name}: {e}")
         return False
@@ -673,15 +740,15 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
     import json as _json
     from src.agent_loop import stream_agent_loop
     transcript = []
-    messages = [
-        {"role": "system", "content":
-            "You are TESTING a skill. Follow this skill's procedure to complete the task "
-            "for real, using your tools, step by step.\n\n=== SKILL ===\n" + md},
-        {"role": "user", "content": task},
-    ]
+    approval_required = None
+    messages = _skill_test_messages(md, task)
     try:
+        # max_tokens explicitly set: passing 0 lets some upstreams (Ollama,
+        # OpenAI-compat) generate an empty completion, which manifested as
+        # the skill test returning nothing while chat (which carries its
+        # preset's max_tokens) worked. 4096 matches the chat default.
         async for chunk in stream_agent_loop(url, model, messages, headers=headers,
-                                             temperature=0.3, max_tokens=0, max_rounds=8, owner=owner):
+                                             temperature=0.3, max_tokens=4096, max_rounds=8, owner=owner):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
             try:
@@ -694,11 +761,44 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
                 transcript.append(f"\n[tool {d.get('tool')}] {str(d.get('command') or d.get('args') or '')[:300]}\n")
             elif d.get("type") == "tool_output":
                 transcript.append(f"[output] {str(d.get('output') or '')[:600]}\n")
+                approval = d.get("ask_user")
+                if (
+                    isinstance(approval, dict)
+                    and approval.get("kind") == "tool_approval"
+                ):
+                    approval_required = approval
+                    break
             elif d.get("type") == "agent_step":
                 transcript.append(f"\n--- round {d.get('round')} ---\n")
     except Exception as e:
         transcript.append(f"\n[run error] {e}\n")
     text = "".join(transcript)
+    if approval_required is not None:
+        # Unattended audits have no authority to approve and no UI that could
+        # resume this record. Destructively deny it now instead of leaving a
+        # reusable opaque grant pending until TTL/cap eviction.
+        try:
+            from src.tool_approvals import tool_approval_store
+            tool_approval_store.consume(
+                approval_required.get("approval_id"),
+                decision="deny",
+                owner=owner,
+                session_id=None,
+            )
+        except Exception:
+            logger.debug("Could not retire unattended skill approval", exc_info=True)
+        return text, {
+            "verdict": "inconclusive",
+            "confidence": 1.0,
+            "summary": (
+                "This automated audit reached an exact action that requires "
+                "a human approval; no action was executed."
+            ),
+            "issues": [
+                "Run this skill's manual test and review the sealed action."
+            ],
+            "approval_required": True,
+        }
     verdict = await _eval_skill_run(md, task, text, url, model, headers)
     return text, verdict
 
@@ -762,11 +862,11 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     # earns a bit less; a skill that still fails is marked low.
     def _set_conf(c):
         try:
-            skills_manager.update_skill(name, {"confidence": c})
+            skills_manager.update_skill(name, {"confidence": c}, owner=owner)
         except Exception:
             pass
 
-    md = skills_manager.read_skill_md(name)
+    md = skills_manager.read_skill_md(name, owner=owner)
     if not md:
         log(f"{name}: no source — skipped")
         return {"skill": name, "result": "skipped"}
@@ -788,7 +888,8 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         nec = await _eval_skill_necessity(md, others, url, model, headers)
         if nec is not None:
             skills_manager.set_necessity(name, nec.get("necessary", True),
-                                         nec.get("redundant_with"), nec.get("reason"))
+                                         nec.get("redundant_with"), nec.get("reason"),
+                                         owner=owner)
             if not nec.get("necessary", True):
                 log(f"{name}: possibly unnecessary — {nec.get('reason', '')[:80]}")
     except Exception as e:
@@ -799,12 +900,12 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     if generic_reason or duplicate_of or (isinstance(nec, dict) and nec.get("necessary") is False):
         reason = generic_reason or (f"Lower-priority duplicate of {duplicate_of}" if duplicate_of else str((nec or {}).get("reason") or "Unnecessary skill"))
         try:
-            skills_manager.update_skill(name, {"status": "draft", "confidence": 0.35})
-            skills_manager.set_audit(name, "skipped", by_teacher=False, worker_model=model)
+            skills_manager.update_skill(name, {"status": "draft", "confidence": 0.35}, owner=owner)
+            skills_manager.set_audit(name, "skipped", by_teacher=False, worker_model=model, owner=owner)
             if duplicate_of:
-                skills_manager.set_necessity(name, False, [duplicate_of], reason)
+                skills_manager.set_necessity(name, False, [duplicate_of], reason, owner=owner)
             else:
-                skills_manager.set_necessity(name, False, [], reason)
+                skills_manager.set_necessity(name, False, [], reason, owner=owner)
         except Exception:
             pass
         log(f"{name}: draft — skipped functional test ({reason[:100]})")
@@ -837,6 +938,26 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
     v = verdict.get("verdict")
     log(f"{name}: verdict = {v} ({verdict.get('summary', '')[:80]})")
+    if verdict.get("approval_required"):
+        # An unattended audit is not authority for an action influenced by the
+        # skill under test. Preserve the skill's current publication/confidence
+        # state and route the exact action to the manual test UI instead of
+        # letting a safety pause demote, rewrite, or auto-publish the skill.
+        skills_manager.set_audit(
+            name,
+            "inconclusive",
+            by_teacher=False,
+            worker_model=model,
+            owner=owner,
+        )
+        status = skill.get("status") or "draft"
+        log(f"{name}: {status} unchanged — exact action needs manual approval")
+        return {
+            "skill": name,
+            "result": "approval_required",
+            "verdict": verdict,
+            "status": status,
+        }
     if v == "pass":
         # Procedure works. If the reviewer still flagged metadata (tags/category/
         # when_to_use/description), do ONE fixer pass to correct the frontmatter
@@ -848,13 +969,13 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
             if fixed and fixed.strip() != md.strip():
                 _apply_skill_md(skills_manager, name, fixed, owner)
         _set_conf(0.95)
-        skills_manager.set_audit(name, "pass", by_teacher=False, worker_model=model)
+        skills_manager.set_audit(name, "pass", by_teacher=False, worker_model=model, owner=owner)
         refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
         status = _audit_finalize_status(skills_manager, name, owner, "pass", 0.95, (refreshed or {}).get("necessity"), verdict)
         log(f"{name}: {status} — confidence 95%")
         return {"skill": name, "result": "pass", "verdict": verdict, "confidence": 0.95, "status": status}
     if v in ("unknown", "inconclusive"):
-        skills_manager.set_audit(name, "inconclusive", by_teacher=False, worker_model=model)
+        skills_manager.set_audit(name, "inconclusive", by_teacher=False, worker_model=model, owner=owner)
         status = _audit_finalize_status(skills_manager, name, owner, "inconclusive", skill.get("confidence") or 0.0, skill.get("necessity"))
         log(f"{name}: {status} — inconclusive")
         return {"skill": name, "result": "inconclusive", "verdict": verdict, "status": status}
@@ -869,7 +990,7 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         log(f"{name}: retry (self) = {v}")
         if v == "pass":
             _set_conf(0.85)
-            skills_manager.set_audit(name, "pass", by_teacher=False, worker_model=model)
+            skills_manager.set_audit(name, "pass", by_teacher=False, worker_model=model, owner=owner)
             refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
             status = _audit_finalize_status(skills_manager, name, owner, "pass", 0.85, (refreshed or {}).get("necessity"), verdict)
             log(f"{name}: {status} — confidence 85% after self-edit")
@@ -893,7 +1014,9 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         log(f"{name}: retry on student after teacher rewrite = {v}")
         if v == "pass":
             _set_conf(0.8)
-            skills_manager.set_audit(name, "pass", by_teacher=True, worker_model=model, teacher_model=t_model)
+            skills_manager.set_audit(
+                name, "pass", by_teacher=True, worker_model=model, teacher_model=t_model, owner=owner
+            )
             refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
             status = _audit_finalize_status(skills_manager, name, owner, "pass", 0.8, (refreshed or {}).get("necessity"), verdict)
             log(f"{name}: {status} — confidence 80% after teacher rewrite")
@@ -901,13 +1024,14 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
 
     # Still failing → demote to draft + low confidence + flag (do NOT delete).
     try:
-        skills_manager.update_skill(name, {"status": "draft", "confidence": 0.35})
+        skills_manager.update_skill(name, {"status": "draft", "confidence": 0.35}, owner=owner)
     except Exception:
         pass
     skills_manager.set_audit(
         name, v or "fail", by_teacher=teacher_ran,
         worker_model=model,
         teacher_model=(teacher[1] if teacher_ran and teacher else ""),
+        owner=owner,
     )
     log(f"{name}: flagged — confidence lowered, kept as draft for manual review")
     return {"skill": name, "result": "flagged", "verdict": verdict, "confidence": 0.35}
@@ -976,7 +1100,7 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
         job.pop("task", None)
 
 
-def _resolve_audit_models():
+def _resolve_audit_models(owner=None):
     """Resolve (url, model, headers, teacher) for an audit run from Settings.
 
     Worker = Utility model (falling back to Default, normalized to a served
@@ -985,7 +1109,7 @@ def _resolve_audit_models():
     ValueError if no worker model.
     """
     from src.endpoint_resolver import resolve_endpoint
-    url, model, headers = resolve_endpoint("utility")
+    url, model, headers = resolve_endpoint("utility", owner=owner)
     if not url or not model:
         raise ValueError("No model configured — set a Default or Utility model in Settings.")
     try:
@@ -1005,7 +1129,7 @@ def _resolve_audit_models():
             spec = (get_setting("teacher_model", "") or "").strip()
             if spec:
                 from src.ai_interaction import _resolve_model
-                t_url, t_model, t_headers = _resolve_model(spec)
+                t_url, t_model, t_headers = _resolve_model(spec, owner=owner)
                 if t_url and t_model:
                     teacher = (t_url, t_model, t_headers)
     except Exception as e:
@@ -1029,7 +1153,7 @@ async def run_scheduled_skill_audit(skills_manager: SkillsManager,
         return {"status": "running", "skipped": True}
 
     try:
-        url, model, headers, teacher = _resolve_audit_models()
+        url, model, headers, teacher = _resolve_audit_models(owner=owner)
     except ValueError as e:
         logger.info(f"Scheduled skill audit skipped — {e}")
         return {"status": "skipped", "reason": str(e)}
@@ -1093,6 +1217,35 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         user = _owner(request)
         idx = skills_manager.index_for(owner=user)
         return {"index": idx, "count": len(idx)}
+
+    @router.get("/slash-catalog")
+    async def get_slash_catalog(request: Request):
+        """Return skills that are available as slash commands.
+
+        Mirrors the agent prompt's published-skill index so the UI never offers
+        a slash command the model would not normally be allowed to discover.
+        """
+        user = _owner(request)
+        all_skills = {s.get("name"): s for s in skills_manager.load(owner=user)}
+        entries = []
+        for s in skills_manager.index_for(owner=user):
+            name = (s.get("name") or "").strip()
+            if not name:
+                continue
+            full = all_skills.get(name) or {}
+            category = (s.get("category") or full.get("category") or "general").strip() or "general"
+            entries.append({
+                "type": "skill",
+                "token": f"/{name}",
+                "name": name,
+                "category": f"Skills / {category}",
+                "help": s.get("description") or full.get("description") or "",
+                "usage": f"/{name} <request>",
+                "uses": int(full.get("uses") or 0),
+                "last_used": full.get("last_used"),
+            })
+        entries.sort(key=lambda row: row["name"])
+        return {"skills": entries, "count": len(entries)}
 
     @router.get("/builtin")
     async def list_builtin_skills(request: Request):
@@ -1194,6 +1347,36 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             save_settings(settings)
         return {"ok": True, "name": name, "is_overridden": False}
 
+    @router.post("/import-from-url")
+    async def import_skill_from_url(request: Request, body: SkillImportUrlRequest):
+        """Install a SKILL.md bundle from a public GitHub URL (skills.sh links supported)."""
+        require_admin(request)
+        user = _owner(request)
+        from services.memory.skill_importer import (
+            SkillImportError,
+            fetch_skill_bundle,
+        )
+
+        try:
+            files, _src = fetch_skill_bundle(body.url.strip())
+            entry = skills_manager.import_bundle_from_files(
+                files,
+                owner=user,
+                source_url=body.url.strip(),
+            )
+        except SkillImportError as e:
+            raise HTTPException(400, str(e)) from e
+        except httpx.HTTPError as e:
+            logger.warning("skill import fetch failed: %s", e)
+            detail = str(e).strip() or "Could not download skill from URL"
+            raise HTTPException(502, detail) from e
+        except Exception as e:
+            logger.error("skill import failed: %s", e)
+            raise HTTPException(500, "Skill import failed") from e
+
+        _fire_skill_added(user)
+        return {"ok": True, "skill": entry, "files": len(files)}
+
     @router.post("/add")
     async def add_skill(request: Request, body: SkillAddRequest):
         user = _owner(request)
@@ -1227,6 +1410,47 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             _fire_skill_added(user)
         return {"ok": True, "deduped": bool(entry.get("_deduped")), "skill": entry}
 
+    @router.post("/{skill_id}/invoke")
+    async def invoke_skill(request: Request, skill_id: str):
+        """Build a skill-pinned prompt for slash-command invocation.
+
+        This is intentionally server-side so availability, ownership, and usage
+        accounting use the same rules as the SkillsManager.
+        """
+        user = _owner(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        request_text = (body.get("request") or "").strip() if isinstance(body, dict) else ""
+
+        invokable = {
+            s.get("name"): s for s in skills_manager.index_for(owner=user)
+            if (s.get("name") or "").strip()
+        }
+        match = invokable.get(skill_id)
+        if not match:
+            raise HTTPException(404, "Skill is not available for slash invocation")
+
+        name = match.get("name")
+        md = skills_manager.read_skill_md(name, owner=user)
+        if md is None:
+            raise HTTPException(404, "Skill source unavailable")
+
+        skills_manager.record_use(name, owner=user)
+        message = (
+            "Apply the skill below to my request, following its Procedure / Pitfalls / Verification.\n\n"
+            f"--- BEGIN SKILL ---\n{md}\n--- END SKILL ---\n\n"
+            + (f"Request: {request_text}" if request_text else "Request: (use the skill as appropriate)")
+        )
+        return {
+            "ok": True,
+            "type": "skill",
+            "name": name,
+            "command": f"/{name}",
+            "message": message,
+        }
+
     @router.get("/{skill_id}")
     async def get_skill(request: Request, skill_id: str):
         user = _owner(request)
@@ -1246,7 +1470,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if not match:
             raise HTTPException(404, "Skill not found")
         _verify_owner(match, user)
-        md = skills_manager.read_skill_md(match.get("name"))
+        md = skills_manager.read_skill_md(match.get("name"), owner=user)
         if md is None:
             raise HTTPException(404, "Skill source unavailable (legacy entry?)")
         return {"name": match.get("name"), "markdown": md}
@@ -1273,14 +1497,14 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             raise HTTPException(404, "Skill not found")
         _verify_owner(match, user)
         name = match.get("name")
-        md = skills_manager.read_skill_md(name) or ""
+        md = skills_manager.read_skill_md(name, owner=user) or ""
 
         if not task:
             task = _skill_test_task(match)
 
         # Prefer the configured DEFAULT (→ Utility) model — not the current chat
         # session's model. Fall back to the caller's session model only if unset.
-        url, model, headers = resolve_endpoint("default")
+        url, model, headers = resolve_endpoint("utility", owner=user)
         if not url or not model:
             url = url or ((body.get("endpoint_url") or "").strip() or None)
             model = model or ((body.get("model") or "").strip() or None)
@@ -1302,6 +1526,19 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             logger.warning(f"Skill-test model resolve failed: {_e}")
 
         key = (user or "", name)
+        previous_job = _skill_test_jobs.get(key) or {}
+        previous_approval = previous_job.get("approval") or {}
+        if previous_approval.get("approval_id"):
+            try:
+                from src.tool_approvals import tool_approval_store
+                tool_approval_store.consume(
+                    previous_approval["approval_id"],
+                    decision="deny",
+                    owner=user,
+                    session_id=None,
+                )
+            except Exception:
+                logger.debug("Could not retire replaced skill approval", exc_info=True)
         _skill_test_jobs[key] = {
             "status": "running",
             "task": task,
@@ -1310,9 +1547,137 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "started": _time.time(),
             "log": [{"type": "skill_test_start", "task": task, "skill": name, "model": model}],
             "verdict": None,
+            "_run": {
+                "md": md,
+                "url": url,
+                "model": model,
+                "headers": headers,
+                "owner": user,
+            },
         }
         _asyncio.create_task(_run_skill_test_job(key, name, md, task, url, model, headers, user, skills_manager))
         return {"ok": True, "status": "running", "skill": name, "model": model}
+
+    @router.post("/{skill_id}/test-approval")
+    async def approve_skill_test_action(request: Request, skill_id: str):
+        """Resume a manual skill test with one exact server-sealed action."""
+        import asyncio as _asyncio
+        from src.tool_approvals import tool_approval_store
+
+        user = _owner(request)
+        skills = skills_manager.load(owner=user)
+        match = next(
+            (s for s in skills if s.get("name") == skill_id or s.get("id") == skill_id),
+            None,
+        )
+        if not match:
+            raise HTTPException(404, "Skill not found")
+        _verify_owner(match, user)
+        name = match.get("name")
+        key = (user or "", name)
+        job = _skill_test_jobs.get(key)
+        if not job or job.get("status") != "awaiting_approval":
+            raise HTTPException(409, "This skill test is not awaiting an approval.")
+
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Tool approval body must be a JSON object.")
+        approval_id = str(body.get("approval_id") or "")
+        decision = str(body.get("decision") or "").strip().lower()
+        expected = job.get("approval") or {}
+        if approval_id != str(expected.get("approval_id") or ""):
+            raise HTTPException(409, "This approval does not match the pending skill test action.")
+        if decision not in {"approve", "deny"}:
+            raise HTTPException(400, "Invalid tool approval decision.")
+
+        pending = tool_approval_store.peek(approval_id)
+        normalized_owner = str(user or "").strip().casefold()
+        if (
+            pending is None
+            or pending.owner != normalized_owner
+            or pending.session_id != ""
+        ):
+            raise HTTPException(409, "This tool approval is invalid or expired.")
+        exact_approval = tool_approval_store.consume(
+            approval_id,
+            decision=decision,
+            owner=user,
+            session_id=None,
+            # The button here says "Allow once" and there is no chat to carry a
+            # scope into, so the gate must re-arm behind the sealed action.
+            allow_continuation=False,
+        )
+
+        if decision == "approve" and exact_approval is None:
+            raise HTTPException(409, "This tool approval could not be consumed.")
+        job.pop("approval", None)
+        if decision == "deny":
+            job.pop("_transcript", None)
+            job.pop("_run", None)
+            job["log"].append({
+                "type": "approval_denied",
+                "text": "Exact action denied; the skill test stopped without executing it.",
+            })
+            job["verdict"] = {
+                "verdict": "inconclusive",
+                "confidence": 1.0,
+                "summary": "The test stopped because its exact action was denied.",
+                "issues": [],
+            }
+            job["status"] = "done"
+            return {"ok": True, "status": "done", "decision": "deny"}
+
+        run = job.get("_run") or {}
+        transcript = job.pop("_transcript", [])
+        # stream_agent_loop owns its per-round message list internally. Rebuild
+        # continuation context from the original untrusted skill plus the
+        # accumulated transcript so repeated approvals do not lose earlier
+        # approved results, while keeping every transcript byte tainted.
+        messages = _skill_test_messages(
+            run.get("md", ""),
+            job.get("task", ""),
+        )
+        if transcript:
+            messages.append(untrusted_context_message(
+                "skill test transcript",
+                "".join(str(item) for item in transcript),
+            ))
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": str(expected.get("question") or "Allow this exact action once?"),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Approved the exact {exact_approval.pending.tool_name} "
+                    "action shown above once."
+                ),
+            },
+        ])
+        job["status"] = "running"
+        job["log"].append({
+            "type": "approval_granted",
+            "text": (
+                f"Approved exact {exact_approval.pending.tool_name} action once; "
+                "resuming test."
+            ),
+        })
+        _asyncio.create_task(_run_skill_test_job(
+            key,
+            name,
+            run.get("md", ""),
+            job.get("task", ""),
+            run.get("url"),
+            run.get("model"),
+            run.get("headers"),
+            run.get("owner"),
+            skills_manager,
+            messages=messages,
+            transcript=transcript,
+            exact_approval=exact_approval,
+        ))
+        return {"ok": True, "status": "running", "decision": "approve"}
 
     @router.get("/{skill_id}/test-status")
     async def test_skill_status(request: Request, skill_id: str):
@@ -1330,6 +1695,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "model": job.get("model"),
             "log": job.get("log", []),
             "verdict": job.get("verdict"),
+            "approval": job.get("approval"),
         }
 
     @router.post("/audit-all")
@@ -1360,7 +1726,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
 
         # Worker model (Default, normalized) + optional teacher — shared resolver.
         try:
-            url, model, headers, teacher = _resolve_audit_models()
+            url, model, headers, teacher = _resolve_audit_models(owner=user)
         except ValueError as e:
             raise HTTPException(400, str(e))
 
@@ -1437,7 +1803,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
     @router.post("/{skill_id}/markdown")
     async def save_skill_markdown(request: Request, skill_id: str):
         """Replace SKILL.md with new raw content. Parses + validates first."""
-        from services.memory.skill_format import Skill, slugify
+        from services.memory.skill_format import Skill
         user = _owner(request)
         body = await request.json()
         new_content = body.get("markdown")
@@ -1452,7 +1818,10 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             sk = Skill.from_markdown(new_content)
         except Exception as e:
             raise HTTPException(400, f"Could not parse SKILL.md: {e}")
-        sk.name = slugify(sk.name or match.get("name"))
+        # Never rename on save: a changed `name` in the markdown would move
+        # the skill dir (update_skill) and orphan the original id, so a later
+        # delete 404s (#1333). Pin to the stored name, like _apply_skill_md.
+        sk.name = match.get("name")
         if not sk.owner:
             sk.owner = match.get("owner") or user
         ok = skills_manager.update_skill(match.get("name"), {
@@ -1474,7 +1843,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "pitfalls": sk.pitfalls,
             "verification": sk.verification,
             "body_extra": sk.body_extra,
-        })
+        }, owner=user)
         if not ok:
             raise HTTPException(500, "Update failed")
         # Manual markdown edits can create or substantially rewrite a draft
@@ -1496,7 +1865,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         updates = body.dict(exclude_none=True)
         if not updates:
             return {"ok": True}
-        ok = skills_manager.update_skill(match.get("name"), updates)
+        ok = skills_manager.update_skill(match.get("name"), updates, owner=user)
         if not ok:
             raise HTTPException(404, "Skill not found")
         if not match.get("audit_verdict"):
@@ -1511,7 +1880,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if not match:
             raise HTTPException(404, "Skill not found")
         _verify_owner(match, user)
-        ok = skills_manager.delete_skill(match.get("name"))
+        ok = skills_manager.delete_skill(match.get("name"), owner=user)
         if not ok:
             raise HTTPException(404, "Skill not found")
         return {"ok": True}

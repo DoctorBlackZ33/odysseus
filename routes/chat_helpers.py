@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -11,14 +13,95 @@ from core.models import ChatMessage
 from core.database import SessionLocal
 from core.database import Session as DBSession, ModelEndpoint
 from src.llm_core import normalize_model_id
+from src.endpoint_resolver import normalize_base
 from src.context_compactor import maybe_compact, trim_for_context
-from src.auth_helpers import get_current_user
+from src.model_context import estimate_tokens, get_context_length
+from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
+from src.attachment_refs import attachment_ref
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+_CASUAL_OPENING_RE = re.compile(
+    r"^\s*(?:h+i+|hey+|hello+|yo+|sup+|what'?s up|wass?up|hiya|howdy|"
+    r"lol|lmao|haha+|hehe+|thanks?|thank you|ty|idk|dunno|meh|bruh|bro)\b(?P<tail>.*)$",
+    re.IGNORECASE,
+)
+_CASUAL_BLOCKLIST_RE = re.compile(
+    r"\b(?:cookbook|serve|serving|launch|start|vllm|sglang|llama\.?cpp|ollama|"
+    r"download|model|email|document|doc|note|calendar|task|search|web|research|"
+    r"file|folder|repo|git|settings?|endpoint|api|token|mcp)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_casual_low_signal(text: str) -> bool:
+    """Short greetings/slang should not pull memory, skills, RAG, or docs."""
+    s = str(text or "").strip()
+    m = _CASUAL_OPENING_RE.match(s)
+    if not m:
+        return False
+    tail = m.group("tail") or ""
+    if _CASUAL_BLOCKLIST_RE.search(tail):
+        return False
+    tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
+    return len(tail_words) <= 2
+
+
+# Strong references to in-flight fire-and-forget tasks scheduled from this
+# module. asyncio only keeps weak references to tasks created via
+# create_task, so without this the GC can collect a task mid-execution and
+# the background work (extraction, auto-naming) silently never runs.
+# Mirrors WebhookManager._spawn_tracked from src/webhook_manager.py.
+_BG_TASKS: set[asyncio.Task] = set()
+_INCOGNITO_CONTEXTS: dict[str, dict[str, Any]] = {}
+_INCOGNITO_CONTEXT_TTL_SECONDS = 6 * 60 * 60
+_INCOGNITO_CONTEXT_MAX_MESSAGES = 80
+
+
+def _spawn_bg(coro) -> asyncio.Task:
+    """Schedule a background task and hold a strong reference until it finishes."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
+
+def _prune_incognito_contexts(now: float | None = None):
+    now = now or time.time()
+    stale = [
+        sid for sid, bundle in _INCOGNITO_CONTEXTS.items()
+        if now - float(bundle.get("updated_at") or 0) > _INCOGNITO_CONTEXT_TTL_SECONDS
+    ]
+    for sid in stale:
+        _INCOGNITO_CONTEXTS.pop(sid, None)
+
+
+def _incognito_messages(session_id: str) -> list[dict[str, Any]]:
+    _prune_incognito_contexts()
+    bundle = _INCOGNITO_CONTEXTS.get(str(session_id or ""))
+    if not bundle:
+        return []
+    return [dict(m) for m in bundle.get("messages", []) if isinstance(m, dict)]
+
+
+def _append_incognito_message(session_id: str, role: str, content: Any, metadata: dict | None = None):
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    _prune_incognito_contexts()
+    bundle = _INCOGNITO_CONTEXTS.setdefault(sid, {"messages": [], "updated_at": time.time()})
+    msg: dict[str, Any] = {"role": role, "content": content}
+    if metadata:
+        msg["metadata"] = dict(metadata)
+    messages = bundle.setdefault("messages", [])
+    messages.append(msg)
+    if len(messages) > _INCOGNITO_CONTEXT_MAX_MESSAGES:
+        del messages[:-_INCOGNITO_CONTEXT_MAX_MESSAGES]
+    bundle["updated_at"] = time.time()
 
 
 # ── Data containers ────────────────────────────────────────────────────── #
@@ -56,14 +139,50 @@ class ChatContext:
     uprefs: dict
     preset: PresetInfo
     preprocessed: PreprocessedMessage
+    context_trimmed: bool = False
+    context_messages_before_trim: int = 0
+    context_messages_after_trim: int = 0
+    context_tokens_before_trim: int = 0
+    context_tokens_after_trim: int = 0
     # Documents auto-created server-side during preprocess (e.g. when an
     # attached fillable PDF gets rendered into a markdown editor doc).
     # The chat route emits a doc_update SSE event for each before streaming
     # begins, so the editor pane switches to the new doc immediately.
     auto_opened_docs: list = field(default_factory=list)
+    # Uploads attached to this user turn, resolved and owner-checked for the
+    # agent's private context. This is not emitted to the browser.
+    uploaded_files: list = field(default_factory=list)
+    # Route-neutral prompt before any model-window compaction/trimming. This is
+    # retained only when explicit foreground fallbacks are enabled so each
+    # concrete candidate can apply its own context budget independently.
+    route_messages: list = field(default_factory=list)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
+
+def _allowed_models_from_privileges(privs: dict) -> Optional[frozenset[str]]:
+    if privs.get("block_all_models"):
+        return frozenset()
+    allowed_raw = privs.get("allowed_models")
+    allowed = allowed_raw if isinstance(allowed_raw, list) else []
+    restricted = bool(privs.get("allowed_models_restricted")) or bool(allowed)
+    return frozenset(model for model in allowed if isinstance(model, str)) if restricted else None
+
+
+def _allowed_models_for_request(request) -> Optional[frozenset[str]]:
+    """Return the caller's model allowlist, or ``None`` when unrestricted."""
+
+    try:
+        user = effective_user(request)
+    except Exception:
+        user = None
+    if not user:
+        return None
+    auth_manager = getattr(getattr(request.app, "state", None), "auth_manager", None)
+    if not auth_manager:
+        return None
+    privs = auth_manager.get_privileges(user) or {}
+    return _allowed_models_from_privileges(privs)
 
 def _enforce_chat_privileges(request, sess) -> None:
     """Apply the per-user privilege gates (allowed_models + max_messages_per_day)
@@ -73,10 +192,10 @@ def _enforce_chat_privileges(request, sess) -> None:
     allowlist, or HTTPException(429) if the user has hit their daily message
     cap. No-op for unauthenticated callers or when auth_manager is absent
     (single-user mode). Admins receive ADMIN_PRIVILEGES from get_privileges,
-    which means empty allowed_models / zero cap → no-op for them.
+    which means unrestricted allowed_models / zero cap -> no-op for them.
     """
     try:
-        user = get_current_user(request)
+        user = effective_user(request)
     except Exception:
         user = None
     if not user:
@@ -86,8 +205,16 @@ def _enforce_chat_privileges(request, sess) -> None:
         return
 
     privs = auth_manager.get_privileges(user) or {}
-    allowed = privs.get("allowed_models") or []
-    if allowed and sess.model and sess.model not in allowed:
+
+    # Explicit "block everything" sentinel takes precedence over the
+    # allowlist — it's the only way to distinguish "user clicked [None]"
+    # (block all) from "user clicked [All]" (no restriction), since both
+    # otherwise produce an empty `allowed_models` list.
+    if privs.get("block_all_models"):
+        raise HTTPException(403, f"Your account is not allowed to use model '{sess.model}'.")
+
+    allowed_models = _allowed_models_from_privileges(privs)
+    if allowed_models is not None and sess.model and sess.model not in allowed_models:
         raise HTTPException(403, f"Your account is not allowed to use model '{sess.model}'.")
 
     cap = int(privs.get("max_messages_per_day") or 0)
@@ -119,7 +246,7 @@ def needs_auto_name(name: str) -> bool:
     if name.startswith("Chat:") or name == "Chat":
         return True
     # Default frontend name: "modelname HH:MM:SS AM/PM"
-    if re.match(r'^.+ \d{1,2}:\d{2}:\d{2}\s*(AM|PM)$', name):
+    if re.match(r"^.+ \d{1,2}:\d{2}:\d{2}(\s*(AM|PM))?$", name, re.IGNORECASE):
         return True
     return False
 
@@ -146,9 +273,13 @@ async def auto_name_session(session_manager, sess):
         if not first_msg:
             return
 
+        owner = getattr(sess, "owner", None)
         t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers,
+            sess.endpoint_url, sess.model, sess.headers, owner=owner
         )
+        if not t_model:
+            logger.debug("[auto-name] No model provided, skipping")
+            return
 
         # max_tokens big enough that reasoning models (Minimax M2,
         # DeepSeek R1, QwQ, etc.) have headroom for <think>…</think>
@@ -182,77 +313,6 @@ async def auto_name_session(session_manager, sess):
         logger.error(f"Auto-name failed for {sess.id}: {e}\n{traceback.format_exc()}")
 
 
-def try_fallback_endpoint(sess, session_id: str) -> dict | None:
-    """Find an alternative working endpoint when the current one fails.
-
-    Returns {"model": ..., "endpoint_url": ..., "endpoint_name": ...} or None.
-    """
-    import requests as _req
-    from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, normalize_base
-
-    current_url = sess.endpoint_url or ""
-    db = SessionLocal()
-    try:
-        endpoints = db.query(ModelEndpoint).filter(
-            ModelEndpoint.is_enabled == True
-        ).all()
-    finally:
-        db.close()
-
-    for ep in endpoints:
-        base = normalize_base(ep.base_url)
-        # Skip current endpoint
-        if current_url and base in current_url:
-            continue
-        # Quick ping
-        ping_url = build_models_url(base)
-        headers = build_headers(ep.api_key, base)
-        try:
-            r = _req.get(ping_url, headers=headers, timeout=5)
-            r.raise_for_status()
-            data = r.json()
-            models = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-            if not models:
-                models = [
-                    m.get("name") or m.get("model")
-                    for m in (data.get("models") or [])
-                    if m.get("name") or m.get("model")
-                ]
-            if not models:
-                continue
-            # Found a working endpoint — update session
-            new_model = models[0]
-            chat_url = build_chat_url(base)
-            new_headers = build_headers(ep.api_key, base)
-
-            sess.model = new_model
-            sess.endpoint_url = chat_url
-            sess.headers = new_headers
-
-            # Persist
-            _db = SessionLocal()
-            try:
-                _db.query(DBSession).filter(DBSession.id == session_id).update({
-                    "model": new_model,
-                    "endpoint_url": chat_url,
-                    "headers": json.dumps(new_headers),
-                })
-                _db.commit()
-            finally:
-                _db.close()
-
-            logger.info(f"Fallback: switched session {session_id} from {current_url} to {ep.name} ({new_model})")
-            return {
-                "model": new_model,
-                "endpoint_url": chat_url,
-                "endpoint_name": ep.name,
-            }
-        except Exception:
-            continue
-
-    return None
-
-
 def extract_preset(chat_handler, preset_id) -> PresetInfo:
     """Extract preset parameters via chat_handler."""
     temperature, max_tokens, system_prompt, char_name = (
@@ -269,11 +329,16 @@ def extract_preset(chat_handler, preset_id) -> PresetInfo:
 async def preprocess(
     chat_handler, message, att_ids, sess,
     auto_opened_docs: Optional[list] = None,
+    allow_tool_preprocessing: bool = True,
 ) -> PreprocessedMessage:
     """Run chat_handler.preprocess_message and wrap the result."""
     enhanced, user_content, text_ctx, yt_transcripts, att_meta = (
         await chat_handler.preprocess_message(
-            message, att_ids, sess, auto_opened_docs=auto_opened_docs
+            message,
+            att_ids,
+            sess,
+            auto_opened_docs=auto_opened_docs,
+            allow_tool_preprocessing=allow_tool_preprocessing,
         )
     )
     return PreprocessedMessage(
@@ -285,53 +350,256 @@ async def preprocess(
     )
 
 
+def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[str]) -> list[dict]:
+    """Resolve current-turn upload IDs into a small tool-facing manifest.
+
+    The chat UI already sends attachment ids, and preprocessing inlines as much
+    text as fits. Agent mode still needs a discoverable bridge for files whose
+    content was truncated/omitted or when the model chooses file tools. Only
+    owner-authorized uploads are included, and paths must remain inside the
+    configured upload directory.
+    """
+    if not att_ids or not upload_handler or not hasattr(upload_handler, "resolve_upload"):
+        return []
+
+    def _read_file_can_open(path: str) -> bool:
+        try:
+            from src.tool_execution import _resolve_tool_path
+
+            return _resolve_tool_path(path) == os.path.realpath(path)
+        except Exception:
+            return False
+
+    manifest: list[dict] = []
+    for att_id in att_ids:
+        try:
+            info = upload_handler.resolve_upload(str(att_id), owner=owner)
+        except Exception:
+            logger.debug("Failed to resolve upload %r for agent manifest", att_id, exc_info=True)
+            continue
+        if not isinstance(info, dict):
+            continue
+
+        path = info.get("path")
+        if path:
+            try:
+                inside = True
+                if hasattr(upload_handler, "_inside_upload_dir"):
+                    inside = bool(upload_handler._inside_upload_dir(path))
+                elif hasattr(upload_handler, "inside_base_dir"):
+                    inside = bool(upload_handler.inside_base_dir(path))
+                if not inside or not os.path.exists(path) or not _read_file_can_open(path):
+                    path = None
+            except Exception:
+                path = None
+
+        ref = attachment_ref({**info, "id": info.get("id") or str(att_id)})
+        ref.update({
+            "id": ref["attachment_id"],
+            "uri": f"odysseus://attachment/{ref['attachment_id']}",
+            "read_policy": "owner_checked_upload",
+            # Transitional compatibility: existing built-in tools can still use
+            # this path, but only after owner, upload-root, and tool-root checks.
+            "path": path,
+        })
+        manifest.append(ref)
+    return manifest
+
+
 def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, incognito: bool = False):
     """Add user message to session history and update session name.
-    In incognito mode, still add to in-memory history (for conversation context)
-    but skip session name update (which would persist)."""
+    Incognito messages must not mutate persistent session history, even in
+    memory, because a later normal turn can persist the same session object."""
+    if incognito:
+        return
     user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
     sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
-    if not incognito:
-        chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
+    chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
 
 
 def fire_message_event(request, webhook_manager, session_id: str, sess, message: str, compare_mode: bool = False):
     """Fire webhook and event_bus events for a new user message."""
     if webhook_manager and not compare_mode:
-        asyncio.create_task(webhook_manager.fire("chat.message", {
+        webhook_manager.fire_and_forget("chat.message", {
             "session_id": session_id, "model": sess.model, "message": message[:2000],
-        }))
+        })
     from src.event_bus import fire_event
-    user = get_current_user(request)
+    user = effective_user(request)
     fire_event("message_sent", user)
 
 
-def resolve_session_auth(sess, session_id: str):
-    """Ensure session has auth headers — resolve from endpoint DB if missing."""
-    has_auth = sess.headers and isinstance(sess.headers, dict) and any(
-        k.lower() in ('authorization', 'x-api-key') for k in sess.headers
+def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
+    if not session_url or not endpoint_base:
+        return False
+    try:
+        from src.endpoint_resolver import build_chat_url, normalize_base
+
+        sess_url = session_url.rstrip("/")
+        base = normalize_base(endpoint_base).rstrip("/")
+        return sess_url in {
+            base,
+            base + "/chat/completions",
+            build_chat_url(base).rstrip("/"),
+        }
+    except Exception:
+        return False
+
+
+def _has_auth_keys(headers) -> bool:
+    """True if a headers dict carries an Authorization/x-api-key entry."""
+    return isinstance(headers, dict) and any(
+        k.lower() in ('authorization', 'x-api-key') for k in headers
     )
-    if has_auth:
+
+
+def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
+    """Ensure session has auth headers — resolve from endpoint DB if missing."""
+    try:
+        from src.chatgpt_subscription import is_chatgpt_subscription_base
+        is_chatgpt_subscription = is_chatgpt_subscription_base(getattr(sess, "endpoint_url", "") or "")
+    except Exception:
+        is_chatgpt_subscription = False
+    has_auth = _has_auth_keys(sess.headers)
+    if has_auth and not is_chatgpt_subscription:
         return
 
     try:
-        from src.endpoint_resolver import build_headers
+        from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
         db = SessionLocal()
         try:
-            domain = sess.endpoint_url.split("//")[1].split("/")[0] if "//" in sess.endpoint_url else ""
-            if domain:
-                ep = db.query(ModelEndpoint).filter(ModelEndpoint.base_url.contains(domain)).first()
-                if ep and ep.api_key:
-                    sess.headers = build_headers(ep.api_key, ep.base_url)
-                    db.query(DBSession).filter(DBSession.id == session_id).update(
-                        {"headers": json.dumps(sess.headers)}
-                    )
-                    db.commit()
-                    logger.info(f"Resolved and persisted auth headers for session {session_id} from endpoint {ep.name}")
+            target_url = getattr(sess, "endpoint_url", "") or ""
+            if not target_url:
+                return
+            q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+            if owner:
+                # Missing headers usually means "recover from the saved endpoint".
+                # Scope that lookup to the session owner, otherwise two users
+                # with similar endpoint URLs can borrow each other's API key.
+                from src.auth_helpers import owner_filter
+                q = owner_filter(q, ModelEndpoint, owner)
+            for ep in q.all():
+                if not _session_url_matches_endpoint(target_url, ep.base_url or ""):
+                    continue
+                try:
+                    base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+                except Exception as e:
+                    logger.warning("Failed to resolve provider auth for session %s: %s", session_id, e)
+                    return
+                if not api_key:
+                    # No usable key (e.g. ChatGPT Subscription needs re-auth).
+                    return
+                sess.headers = build_headers(api_key, base)
+                if is_chatgpt_subscription:
+                    # The bearer is short-lived and re-resolved per request, so it
+                    # stays request-local and is never written to the plaintext
+                    # sessions.headers column. Proactively strip any bearer an
+                    # older code path may have persisted so it does not linger.
+                    stale_q = db.query(DBSession).filter(DBSession.id == session_id)
+                    if owner:
+                        stale_q = stale_q.filter(DBSession.owner == owner)
+                    stored = stale_q.first()
+                    if stored is not None and _has_auth_keys(stored.headers):
+                        stale_q.update({"headers": {}})
+                        db.commit()
+                        logger.info(f"Cleared persisted ChatGPT Subscription bearer from session {session_id}")
+                    logger.debug(f"Resolved request-local ChatGPT Subscription auth for session {session_id}")
+                    return
+                update_q = db.query(DBSession).filter(DBSession.id == session_id)
+                if owner:
+                    update_q = update_q.filter(DBSession.owner == owner)
+                update_q.update({"headers": sess.headers})
+                db.commit()
+                logger.info(f"Resolved and persisted auth headers for session {session_id} from endpoint {ep.name}")
+                return
         finally:
             db.close()
     except Exception as e:
         logger.warning(f"Failed to resolve session headers: {e}")
+
+
+def _match_cached_model_id(requested: str, models) -> Optional[str]:
+    if not requested or not models:
+        return None
+    model_ids = [str(m) for m in models if m]
+    if requested in model_ids:
+        return requested
+
+    req_base = os.path.basename(requested.rstrip("/"))
+    for model_id in model_ids:
+        if os.path.basename(model_id.rstrip("/")) == req_base:
+            return model_id
+    return None
+
+
+def _normalize_model_id_from_cache(sess) -> Optional[str]:
+    """Use stored endpoint model IDs before falling back to a live /models probe."""
+    endpoint_url = getattr(sess, "endpoint_url", "") or ""
+    requested = getattr(sess, "model", "") or ""
+    if not endpoint_url or not requested:
+        return None
+
+    try:
+        session_base = normalize_base(endpoint_url)
+    except Exception:
+        session_base = endpoint_url.rstrip("/")
+    if not session_base:
+        return None
+
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        owner = getattr(sess, "owner", None)
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        endpoints = q.all()
+        for ep in endpoints:
+            try:
+                if normalize_base(getattr(ep, "base_url", "") or "") != session_base:
+                    continue
+            except Exception:
+                continue
+
+            raw_models = getattr(ep, "cached_models", None)
+            if not raw_models:
+                continue
+            try:
+                models = json.loads(raw_models) if isinstance(raw_models, str) else raw_models
+            except Exception:
+                continue
+
+            matched = _match_cached_model_id(requested, models)
+            if matched:
+                return matched
+    except Exception as e:
+        logger.debug("Cached model normalization skipped: %s", e)
+    finally:
+        db.close()
+
+    return None
+
+
+def _session_is_research_spinoff(sess) -> bool:
+    """True if this session was created via research "Discuss" spin-off.
+
+    Detected by the primer system message the spin-off endpoint seeds into
+    history (metadata ``research_spinoff_from``). Such sessions are grounded
+    on the seeded report, so global memory + personal-doc RAG injection is
+    suppressed for them (the report is the sole knowledge base). Handles both
+    ChatMessage objects and plain dicts.
+    """
+    for m in getattr(sess, "history", []) or []:
+        role = getattr(m, "role", None)
+        if role is None and isinstance(m, dict):
+            role = m.get("role")
+        if role != "system":
+            continue
+        md = getattr(m, "metadata", None)
+        if md is None and isinstance(m, dict):
+            md = m.get("metadata")
+        if (md or {}).get("research_spinoff_from"):
+            return True
+    return False
 
 
 async def build_chat_context(
@@ -354,6 +622,10 @@ async def build_chat_context(
     webhook_manager=None,
     use_enhanced_message: bool = False,
     agent_mode: bool = False,
+    allow_tool_preprocessing: bool = True,
+    defer_context_shaping: bool = False,
+    continuation_context_message: str | None = None,
+    persist_user_message: bool = True,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -371,41 +643,82 @@ async def build_chat_context(
     preprocessed = await preprocess(
         chat_handler, message, att_ids or [], sess,
         auto_opened_docs=auto_opened_docs,
+        allow_tool_preprocessing=allow_tool_preprocessing,
     )
 
-    # Add user message to history
-    add_user_message(sess, chat_handler, preprocessed, incognito=incognito)
+    # Add user message to history. Nobody/incognito uses a request-local
+    # transcript store instead of session history so stale saved chats cannot
+    # bleed into context and the turn is not persisted.
+    if persist_user_message and incognito:
+        user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
+        _append_incognito_message(session_id, "user", preprocessed.user_content, user_meta)
+    elif persist_user_message:
+        add_user_message(sess, chat_handler, preprocessed, incognito=False)
 
     # Fire events
-    if not incognito:
+    if persist_user_message and not incognito:
         fire_message_event(request, webhook_manager, session_id, sess, message, compare_mode)
 
-    # Resolve user prefs
-    user = get_current_user(request)
+    # Resolve owner-scoped prefs/context. Browser requests keep the cookie user;
+    # bearer-token chat requests use the token owner instead of the "api" sentinel.
+    user = effective_user(request)
     uprefs = load_prefs_for_user(user)
+    uploaded_files = build_uploaded_file_manifest(
+        att_ids or [],
+        getattr(chat_handler, "upload_handler", None),
+        getattr(sess, "owner", None),
+    )
+    context_message = (
+        str(continuation_context_message).strip()
+        if continuation_context_message
+        else message
+    )
+    casual_low_signal = _is_casual_low_signal(context_message)
 
     # Memory enabled?
     mem_enabled = not incognito and not no_memory and uprefs.get("memory_enabled", True)
     # Skills injection respects its own enable toggle (mirrors memory_enabled).
     # When off, the "Available skills" index is not added to the prompt.
     skills_enabled = not incognito and uprefs.get("skills_enabled", True)
+    if not allow_tool_preprocessing:
+        mem_enabled = False
+        skills_enabled = False
+    if casual_low_signal:
+        mem_enabled = False
+        skills_enabled = False
     logger.debug(
         "Memory enabled=%s for user=%s (incognito=%s, no_memory=%s, pref=%s)",
         mem_enabled, user, incognito, no_memory, uprefs.get("memory_enabled", "NOT_SET"),
     )
 
+    # Research-spinoff ("Discuss") sessions are grounded on the seeded report:
+    # the primer system message IS the knowledge base. Injecting global memory
+    # or personal-doc RAG on every turn pulls in keyword-matched but off-topic
+    # facts ("wrong data") and competes with the report, so suppress both here.
+    is_research_spinoff = _session_is_research_spinoff(sess)
+    if is_research_spinoff:
+        mem_enabled = False
+
     # Use RAG?
     use_rag_val = (str(use_rag).lower() != "false") if use_rag is not None else True
-    if incognito:
+    if incognito or not allow_tool_preprocessing or is_research_spinoff or casual_low_signal:
         use_rag_val = False
 
     # If pre-fetched search context was provided (compare mode), skip live web search
-    skip_web = bool(search_context)
+    skip_web = bool(search_context) or not allow_tool_preprocessing or casual_low_signal
 
     # Build context preface
     # The stream path uses enhanced_message (with CoT/preprocessing applied),
     # the sync path uses text_for_context.
-    _ctx_msg = preprocessed.enhanced_message if use_enhanced_message else preprocessed.text_for_context
+    _ctx_msg = (
+        context_message
+        if continuation_context_message
+        else (
+            preprocessed.enhanced_message
+            if use_enhanced_message
+            else preprocessed.text_for_context
+        )
+    )
     _preface_kwargs = dict(
         message=_ctx_msg,
         session=sess,
@@ -419,7 +732,7 @@ async def build_chat_context(
         incognito=incognito,
         use_skills=skills_enabled,
     )
-    if use_rag is not None:
+    if use_rag is not None or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
 
@@ -427,26 +740,67 @@ async def build_chat_context(
     used_memories = getattr(chat_processor, '_last_used_memories', [])
 
     # Inject pre-fetched search context (compare mode)
-    if search_context:
+    if search_context and allow_tool_preprocessing and not casual_low_signal:
         preface.append(untrusted_context_message("prefetched search context", search_context))
 
     # YouTube transcripts
     for transcript in preprocessed.youtube_transcripts:
         preface.append(untrusted_context_message("youtube transcript", transcript))
 
-    # Normalize model ID
-    norm = normalize_model_id(sess.endpoint_url, sess.model)
+    # Normalize model ID. Prefer cached endpoint models so group chat does not
+    # re-hit slow local /models endpoints on every participant turn.
+    norm = _normalize_model_id_from_cache(sess) or normalize_model_id(
+        sess.endpoint_url,
+        sess.model,
+        owner=getattr(sess, "owner", None),
+    )
     if norm:
         sess.model = norm
 
-    # Build messages
-    messages = preface + sess.get_context_messages()
+    # Build messages. In Nobody/incognito mode, never read saved session
+    # history: the session id may be a temporary wrapper or, in buggy clients, a
+    # stale normal session id. Only the ephemeral incognito transcript is safe.
+    messages = preface + (_incognito_messages(session_id) if incognito else sess.get_context_messages())
 
-    # Auto-compact
-    messages, context_length, was_compacted = await maybe_compact(
-        sess, sess.endpoint_url, sess.model, messages, sess.headers,
-    )
-    messages = trim_for_context(messages, context_length)
+    # Current date/time — injected as a standalone *user*-role context message
+    # placed immediately before the latest user turn, NOT folded into the
+    # system prompt. Its text changes every minute, and local OpenAI-compatible
+    # backends (llama.cpp / LM Studio) key their KV-cache prefix off the
+    # system message byte-for-byte; mixing ever-changing timestamp text into
+    # it would invalidate the cached prefix on every request (issue #2927).
+    # Placing it at the tail also keeps it out of the stable
+    # preface+history prefix, so that prefix stays byte-identical turn over
+    # turn (modulo the genuinely new history entries) and the cache survives.
+    if not agent_mode:
+        try:
+            from src.user_time import current_datetime_context_message
+            _dt_msg = current_datetime_context_message()
+            if messages and messages[-1].get("role") == "user":
+                messages.insert(len(messages) - 1, _dt_msg)
+            else:
+                messages.append(_dt_msg)
+        except Exception:
+            logger.debug("Failed to add current date/time context", exc_info=True)
+
+    route_messages = list(messages)
+    # Explicit fallback routing must shape from the same route-neutral prompt
+    # for every candidate. Running selected-model compaction here would mutate
+    # session history before we know which route can answer and would make a
+    # later larger-context candidate unable to recover discarded history.
+    if defer_context_shaping:
+        context_length = get_context_length(sess.endpoint_url, sess.model)
+        was_compacted = False
+    else:
+        messages, context_length, was_compacted = await maybe_compact(
+            sess, sess.endpoint_url, sess.model, messages, sess.headers, owner=user,
+        )
+    _before_trim_messages = len(messages)
+    _before_trim_tokens = estimate_tokens(messages)
+    if not defer_context_shaping:
+        messages = trim_for_context(messages, context_length)
+    _after_trim_messages = len(messages)
+    _after_trim_tokens = estimate_tokens(messages)
+    _context_trimmed = _after_trim_messages < _before_trim_messages or _after_trim_tokens < _before_trim_tokens
 
     return ChatContext(
         preface=preface,
@@ -460,7 +814,14 @@ async def build_chat_context(
         uprefs=uprefs,
         preset=preset,
         preprocessed=preprocessed,
+        context_trimmed=_context_trimmed,
+        context_messages_before_trim=_before_trim_messages,
+        context_messages_after_trim=_after_trim_messages,
+        context_tokens_before_trim=_before_trim_tokens,
+        context_tokens_after_trim=_after_trim_tokens,
         auto_opened_docs=auto_opened_docs,
+        uploaded_files=uploaded_files,
+        route_messages=route_messages,
     )
 
 
@@ -494,6 +855,8 @@ def _normalize_thinking(text: str) -> str:
     import re
     if not text:
         return text
+    from src.text_helpers import normalize_thinking_markup
+    text = normalize_thinking_markup(text)
     reasoning_prefix_re = re.compile(
         r'^\s*(?:thinking(?:\s+process)?\s*:|the user |i need |i should |i will |they are |the question |i can )',
         re.IGNORECASE,
@@ -604,6 +967,10 @@ def _extract_thinking_meta(text: str) -> dict | None:
     import re
     if not text:
         return None
+    from src.text_helpers import normalize_thinking_markup
+    original_text = text
+    text = normalize_thinking_markup(text)
+    normalized_changed = text != original_text
 
     # Check for <think> tags (native or injected)
     time_match = re.search(r'<think(?:ing)?\s+time="([\d.]+)"', text)
@@ -634,6 +1001,9 @@ def _extract_thinking_meta(text: str) -> dict | None:
             if thinking and reply:
                 return {"thinking": thinking, "reply": reply, "time": think_time}
 
+    if normalized_changed and text.strip() and text.strip() != original_text.strip():
+        return {"thinking": "", "reply": text.strip(), "time": think_time}
+
     return None
 
 
@@ -642,7 +1012,8 @@ def clean_thinking_for_save(content: str, metadata: dict | None = None) -> tuple
     md = dict(metadata) if metadata else {}
     info = _extract_thinking_meta(content)
     if info:
-        md["thinking"] = info["thinking"]
+        if info.get("thinking"):
+            md["thinking"] = info["thinking"]
         if info.get("time"):
             md["thinking_time"] = info["time"]
         return info["reply"], md
@@ -665,9 +1036,26 @@ def save_assistant_response(
     tool_events: list = None,
     incognito: bool = False,
 ):
-    """Add assistant response to session history. In incognito mode, keeps in-memory context but skips DB persistence."""
+    """Add assistant response to session history.
+
+    Incognito responses are intentionally not added to the session object. The
+    session may later be saved by a normal turn, so "in-memory only" is not
+    private enough.
+    """
     md = dict(last_metrics) if last_metrics else {}
-    md["model"] = sess.model
+    def _model_value(value) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            value = str(value)
+        return value.strip()
+
+    requested_model = _model_value(md.get("requested_model") or md.get("selected_model") or getattr(sess, "model", ""))
+    actual_model = _model_value(md.get("model") or md.get("actual_model") or requested_model)
+    if requested_model:
+        md["requested_model"] = requested_model
+    if actual_model:
+        md["model"] = actual_model
     if character_name:
         md["character_name"] = character_name
     if web_sources:
@@ -686,24 +1074,25 @@ def save_assistant_response(
     # Extract thinking into metadata (don't pollute message content with <think> tags)
     _think_info = _extract_thinking_meta(full_response)
     if _think_info:
-        md["thinking"] = _think_info["thinking"]
-        md["thinking_time"] = _think_info.get("time")
+        if _think_info.get("thinking"):
+            md["thinking"] = _think_info["thinking"]
+        if _think_info.get("time"):
+            md["thinking_time"] = _think_info.get("time")
         _content = _think_info["reply"]
     else:
         _content = full_response
+    if incognito:
+        _append_incognito_message(session_id, "assistant", _content, md)
+        return None
     sess.add_message(ChatMessage("assistant", _content, metadata=md))
 
-    if not incognito:
-        from core.database import update_session_last_accessed
-        update_session_last_accessed(session_id)
-        session_manager.save_sessions()
+    from core.database import update_session_last_accessed
+    update_session_last_accessed(session_id)
+    session_manager.save_sessions()
 
     # Return the persisted message's DB id so the stream can wire it onto the
     # freshly-rendered bubble — lets the user edit/delete a just-streamed reply
-    # without reloading. Incognito returns None: those messages are ephemeral,
-    # so we don't hand out an edit/delete handle for them.
-    if incognito:
-        return None
+    # without reloading.
     try:
         _last = sess.history[-1]
         _meta = getattr(_last, "metadata", None)
@@ -712,6 +1101,54 @@ def save_assistant_response(
     except (IndexError, AttributeError):
         pass
     return None
+
+
+def _is_session_stream_active(session_id: str) -> bool:
+    """Best-effort check for "is a chat completion currently streaming for
+    this session?" — used to keep background extraction from overlapping a
+    main completion and competing for the local backend's processing slots
+    (issue #2927). Lazily imports the route module's live registry to avoid
+    a circular import (chat_routes imports this module at load time)."""
+    try:
+        from routes import chat_routes as _cr
+        return session_id in getattr(_cr, "_active_streams", {})
+    except Exception:
+        return False
+
+
+async def _run_extraction_jobs_sequentially(session_id: str, jobs: list, max_wait_s: float = 120.0):
+    """Run queued background-extraction coroutines one at a time, only once
+    no chat completion is actively streaming for this session.
+
+    As diagnosed in issue #2927, firing memory/skill extraction concurrently
+    with the main chat completion (or with each other) makes them compete for
+    the local backend's limited processing slots, evicting the main
+    conversation's cached KV-cache checkpoint and forcing a full prompt
+    re-evaluation on the next turn. Waiting for the stream to go idle and then
+    running the jobs strictly in sequence keeps at most one "side" request in
+    flight against the backend at any time, and never alongside the user's
+    own conversation.
+    """
+    # Wait for the triggering turn's own stream to finish winding down (it
+    # almost always already has by the time this task gets scheduled — this
+    # is a small safety margin, not the primary mechanism).
+    waited = 0.0
+    poll = 0.25
+    while _is_session_stream_active(session_id) and waited < max_wait_s:
+        await asyncio.sleep(poll)
+        waited += poll
+
+    for name, job in jobs:
+        # Re-check before each job: a fast follow-up message from the user
+        # may have started a new stream for this session while we waited.
+        waited = 0.0
+        while _is_session_stream_active(session_id) and waited < max_wait_s:
+            await asyncio.sleep(poll)
+            waited += poll
+        try:
+            await job
+        except Exception:
+            logger.warning("[bg-extract] %s extraction job failed for session %s", name, session_id, exc_info=True)
 
 
 def run_post_response_tasks(
@@ -734,21 +1171,37 @@ def run_post_response_tasks(
     skills_manager=None,
     owner: str = None,
     extract_skills: bool = True,
+    allow_background_extraction: bool = True,
 ):
-    """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction."""
+    """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
+
+    Memory/skill extraction are queued to run *sequentially*, after the main
+    completion stream for this session has fully wound down — never
+    concurrently with it or with each other. As diagnosed in issue #2927,
+    firing these "side" LLM calls in parallel with the main chat completion
+    makes them compete for the local backend's limited processing slots
+    (llama.cpp defaults to 4), evicting the main conversation's cached
+    checkpoint and forcing a full prompt re-evaluation on the next turn. By
+    the time this function runs the main response is already saved, but the
+    extraction calls themselves are still async — queuing them through
+    ``_queue_background_extraction`` keeps them from overlapping the *next*
+    turn's request too.
+    """
+    _extraction_jobs: list = []
+
     # Memory extraction — only every 4th message pair to avoid excess LLM calls
     _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
     _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-    if not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
+    if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
         from services.memory.memory_extractor import extract_and_store
         from src.task_endpoint import resolve_task_endpoint
         t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers,
+            sess.endpoint_url, sess.model, sess.headers, owner=owner,
         )
-        asyncio.create_task(extract_and_store(
+        _extraction_jobs.append(("memory", extract_and_store(
             sess, memory_manager, memory_vector,
             t_url, t_model, t_headers,
-        ))
+        )))
 
     # Skill extraction from complex agent runs. Only when the user actually
     # chose agent mode — not a chat we auto-escalated for a notes/calendar
@@ -766,6 +1219,7 @@ def run_post_response_tasks(
     )
     if (
         extract_skills
+        and allow_background_extraction
         and auto_skills_enabled
         and not incognito
         and not compare_mode
@@ -780,15 +1234,18 @@ def run_post_response_tasks(
             from services.memory.skill_extractor import maybe_extract_skill
             from src.task_endpoint import resolve_task_endpoint
             s_url, s_model, s_headers = resolve_task_endpoint(
-                sess.endpoint_url, sess.model, sess.headers,
+                sess.endpoint_url, sess.model, sess.headers, owner=owner,
             )
             logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
-            asyncio.create_task(maybe_extract_skill(
+            _extraction_jobs.append(("skill", maybe_extract_skill(
                 sess, skills_manager,
                 s_url, s_model, s_headers,
                 agent_rounds, agent_tool_calls,
                 owner=owner,
-            ))
+            )))
+
+    if _extraction_jobs:
+        _spawn_bg(_run_extraction_jobs_sequentially(session_id, _extraction_jobs))
 
     # Token accumulation
     if last_metrics:
@@ -796,11 +1253,11 @@ def run_post_response_tasks(
 
     # Webhook
     if webhook_manager and not compare_mode:
-        asyncio.create_task(webhook_manager.fire("chat.completed", {
+        webhook_manager.fire_and_forget("chat.completed", {
             "session_id": session_id, "model": sess.model,
             "user_message": message, "response": full_response[:2000],
-        }))
+        })
 
     # Auto-name
     if needs_auto_name(sess.name):
-        asyncio.create_task(auto_name_session(session_manager, sess))
+        _spawn_bg(auto_name_session(session_manager, sess))

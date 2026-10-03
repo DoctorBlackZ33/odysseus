@@ -3,19 +3,35 @@
 
 import Storage from './storage.js';
 
+function markComposerUserEdited() {
+  const msgInput = document.getElementById('message');
+  if (!msgInput || msgInput.dataset.startupPreserveBound === '1') return;
+  msgInput.dataset.startupPreserveBound = '1';
+  msgInput.addEventListener('input', () => {
+    window.__odysseusComposerUserEdited = !!msgInput.value;
+  });
+}
+
 function clearFreshComposerRestore() {
   const msgInput = document.getElementById('message');
   if (!msgInput) return;
-  const hasSessionTarget = !!(window.location.hash || Storage.get('lastSessionId'));
+  markComposerUserEdited();
+  const hash = window.location.hash || '';
+  const isEntityHash = /^#(?:document|note|image|email|event|task|skill|research)-/.test(hash)
+    || /^#open=notes&note=/.test(hash);
+  const hasSessionTarget = !!(hash && !isEntityHash);
   if (hasSessionTarget) return;
+  if (window.__odysseusComposerUserEdited || document.activeElement === msgInput) return;
   if (msgInput.value) {
     msgInput.value = '';
     msgInput.dispatchEvent(new Event('input', { bubbles: true }));
   }
 }
 
+markComposerUserEdited();
 clearFreshComposerRestore();
 window.addEventListener('pageshow', clearFreshComposerRestore);
+document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: true });
 
 // SECURITY: defense-in-depth state wipe on user switch. If the authenticated
 // user is different from the one whose state is cached in this browser,
@@ -163,6 +179,39 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
     new MutationObserver(_sync).observe(rail, { attributes: true, attributeFilter: ['class', 'style'] });
   }
   window.addEventListener('resize', _sync);
+}
+
+/* Keep minimized tool chips above the composer. Both the current modalManager
+   dock and the legacy fallback dock consume this root-level clearance. */
+{
+  const root = document.documentElement;
+  const chatBar = document.querySelector('.chat-input-bar');
+  const attachStrip = document.getElementById('attach-strip');
+  const chatContainer = document.getElementById('chat-container');
+  const _syncComposerClearance = () => {
+    let top = window.innerHeight;
+    for (const el of [attachStrip, chatBar]) {
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 0) top = Math.min(top, rect.top);
+    }
+    const clearance = Math.max(12, Math.ceil(window.innerHeight - top + 8));
+    root.style.setProperty('--composer-clearance', clearance + 'px');
+  };
+  requestAnimationFrame(_syncComposerClearance);
+  if (typeof ResizeObserver !== 'undefined') {
+    const ro = new ResizeObserver(_syncComposerClearance);
+    if (chatBar) ro.observe(chatBar);
+    if (attachStrip) ro.observe(attachStrip);
+  }
+  if (chatContainer && typeof MutationObserver !== 'undefined') {
+    new MutationObserver(_syncComposerClearance).observe(chatContainer, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+  }
+  if (chatBar) chatBar.addEventListener('transitionend', _syncComposerClearance);
+  window.addEventListener('resize', _syncComposerClearance);
 }
 
 /* ---- Resizable sidebar — drag edge to resize, collapse if small, drag rail edge to expand ---- */
