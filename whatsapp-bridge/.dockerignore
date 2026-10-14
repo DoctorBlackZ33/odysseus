@@ -1,0 +1,14 @@
+data
+logs
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+.env
+*.env
+*.pem
+*.key
+*.crt
+node_modules
+npm-debug.log*
+test-query*.js

@@ -445,6 +445,59 @@ class EmailAccountOwnerLock(Base):
     owner_key = Column(String, primary_key=True)
 
 
+
+
+class ConnectorAccount(TimestampMixin, Base):
+    """Owner-scoped personal connector configuration.
+
+    Non-secret settings are JSON text. Provider credentials and browser state
+    are Fernet-encrypted JSON in ``credentials``; never return it to clients.
+    """
+    __tablename__ = "connector_accounts"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=False, index=True, default="")
+    provider = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=False, default="")
+    status = Column(String, nullable=False, default="setup_required")
+    config = Column(Text, nullable=False, default="{}")
+    credentials = Column(Text, nullable=False, default="")
+    last_sync_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_connector_accounts_owner_provider", "owner", "provider"),
+    )
+
+
+class ConnectorSourceRecord(TimestampMixin, Base):
+    """Deduplicated source content used by owner-filtered retrieval."""
+    __tablename__ = "connector_source_records"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=False, index=True, default="")
+    account_id = Column(String, nullable=True, index=True)
+    provider = Column(String, nullable=False, index=True)
+    source_type = Column(String, nullable=False, default="record")
+    external_id = Column(String, nullable=False)
+    title = Column(String, nullable=False, default="")
+    content = Column(Text, nullable=False, default="")
+    source_url = Column(Text, nullable=True)
+    remote_created_at = Column(String, nullable=True)
+    remote_updated_at = Column(String, nullable=True)
+    metadata_json = Column(Text, nullable=False, default="{}")
+    semantic_indexed = Column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        Index("ix_connector_records_owner_provider", "owner", "provider"),
+        Index("ix_connector_records_owner_account", "owner", "account_id"),
+        Index("ix_connector_records_owner_remote_date", "owner", "remote_created_at"),
+        Index(
+            "ux_connector_records_identity",
+            "owner", "provider", "account_id", "external_id",
+            unique=True,
+        ),
+    )
 _EMAIL_ACCOUNT_DEFAULT_INDEX = "ux_email_accounts_one_default_per_owner"
 _EMAIL_ACCOUNT_DEFAULT_INDEX_DDL = {
     "sqlite": (
@@ -821,6 +874,9 @@ class TaskRun(Base):
     tokens_used = Column(Integer, nullable=True)
     steps       = Column(Text, nullable=True)             # JSON log of agent tool calls
     model       = Column(String, nullable=True)           # model that actually ran (resolved at execution)
+    is_scheduled_occurrence = Column(
+        Boolean, nullable=False, default=False, server_default=text("FALSE"),
+    )
 
     task = relationship("ScheduledTask", backref=backref("runs", cascade="all, delete-orphan",
                         order_by="TaskRun.started_at.desc()"))
@@ -828,7 +884,6 @@ class TaskRun(Base):
     __table_args__ = (
         Index('ix_task_runs_task', 'task_id', 'started_at'),
     )
-
 
 class Memory(Base):
     """
@@ -1134,6 +1189,24 @@ def _migrate_add_task_run_model_column():
             conn.close()
         except Exception:
             pass
+
+def _migrate_add_task_run_scheduled_occurrence_column():
+    """Track scheduled provenance so restart retries cannot reuse manual runs."""
+    try:
+        with engine.begin() as connection:
+            if not inspect(connection).has_table("task_runs"):
+                return
+            columns = {
+                column["name"] for column in inspect(connection).get_columns("task_runs")
+            }
+            if "is_scheduled_occurrence" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE task_runs ADD COLUMN "
+                    "is_scheduled_occurrence BOOLEAN NOT NULL DEFAULT FALSE"
+                ))
+    except Exception as exc:
+        logger.warning("task_runs scheduled-occurrence migration failed: %s", exc)
+
 
 def _migrate_add_supports_tools_column():
     """Add supports_tools column to model_endpoints if it doesn't exist."""
@@ -2110,6 +2183,7 @@ def init_db():
     _migrate_add_provider_auth_id_column()
     _migrate_add_supports_tools_column()
     _migrate_add_task_run_model_column()
+    _migrate_add_task_run_scheduled_occurrence_column()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()

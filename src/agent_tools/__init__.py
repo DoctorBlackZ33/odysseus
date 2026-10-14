@@ -33,6 +33,10 @@ from .admin_tools import (
     do_manage_endpoints, do_manage_mcp, do_manage_webhooks,
     do_manage_tokens, do_manage_settings,
 )
+from .personal_connector_tools import (
+    browser_session, connector_search, connector_sync, maps_search, moodle_read,
+    shopping_search, whatsapp_read, whatsapp_send,
+)
 
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
@@ -63,6 +67,14 @@ TOOL_HANDLERS = {
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
+    "connector_search": connector_search,
+    "connector_sync": connector_sync,
+    "moodle_read": moodle_read,
+    "whatsapp_read": whatsapp_read,
+    "whatsapp_send": whatsapp_send,
+    "browser_session": browser_session,
+    "maps_search": maps_search,
+    "shopping_search": shopping_search,
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
 TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
@@ -111,6 +123,8 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              # Generic loopback to any UI-button endpoint (cookbook,
              # gallery, email folders, etc.) — agent uses this when
              # there's no named tool wrapper for the action.
+             "connector_search", "connector_sync", "moodle_read", "whatsapp_read",
+             "whatsapp_send", "browser_session", "maps_search", "shopping_search",
              "app_api"} | BUILTIN_EMAIL_TOOLS
 
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])

@@ -1,0 +1,29 @@
+[Unit]
+Description=WhatsApp Bridge for Odysseus
+After=network.target
+
+[Service]
+Type=simple
+User=odysseus
+Group=odysseus
+WorkingDirectory=/opt/odysseus/whatsapp-bridge
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+EnvironmentFile=/etc/odysseus/whatsapp-bridge.env
+StateDirectory=odysseus-whatsapp
+StateDirectoryMode=0700
+Environment=WHATSAPP_PORT=9100
+Environment=WHATSAPP_DATA_DIR=/var/lib/odysseus-whatsapp
+Environment=WHATSAPP_BIND=127.0.0.1
+Environment=WHATSAPP_CONNECT=false
+Environment=WHATSAPP_ENABLE_WRITES=false
+Environment=NODE_ENV=production
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

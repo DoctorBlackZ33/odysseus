@@ -47,6 +47,9 @@ services:
       - ODYSSEUS_ADMIN_USER=${ODYSSEUS_ADMIN_USER:-admin}
       - ODYSSEUS_ADMIN_PASSWORD=${ODYSSEUS_ADMIN_PASSWORD:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
+      - ODYSSEUS_BROWSER_HEADLESS=${ODYSSEUS_BROWSER_HEADLESS:-true}
+      - ODYSSEUS_BROWSER_EXECUTABLE=${ODYSSEUS_BROWSER_EXECUTABLE:-}
+      - PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}
       - SECURE_COOKIES=${SECURE_COOKIES:-}
       - EMBEDDING_URL=${EMBEDDING_URL:-}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
@@ -71,6 +74,10 @@ services:
       - GOOGLE_PSE_CX=${GOOGLE_PSE_CX:-}
       - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:-}
       - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      - WHATSAPP_API_TOKEN=${WHATSAPP_API_TOKEN:-}
+      - WHATSAPP_ACCOUNT_ID=${WHATSAPP_ACCOUNT_ID:-}
+      - WHATSAPP_BRIDGE_URL=${WHATSAPP_BRIDGE_URL:-http://whatsapp-bridge:9100}
+      - WHATSAPP_ENABLE_WRITES=${WHATSAPP_ENABLE_WRITES:-false}
       - GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI:-}
       # Externally reachable origin for MCP OAuth callbacks. The container
       # always listens on 7000 and cannot see the host port map above, so
@@ -170,6 +177,27 @@ services:
       - ntfy-cache:/var/cache/ntfy
     environment:
       - NTFY_BASE_URL=${NTFY_BASE_URL:-http://localhost:8091}
+    restart: unless-stopped
+
+  # Optional single-device WhatsApp Web session. Enable with
+  # COMPOSE_PROFILES=whatsapp and explicit WHATSAPP_CONNECT=true only when
+  # the owner is ready to pair. The API port is host-loopback-only.
+  # Sends additionally require WHATSAPP_ENABLE_WRITES=true in both app and bridge; default off.
+  whatsapp-bridge:
+    profiles: ["whatsapp"]
+    build: ./whatsapp-bridge
+    ports:
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - ./whatsapp-bridge/data:/app/data
+    environment:
+      - WHATSAPP_API_TOKEN=${WHATSAPP_API_TOKEN:-}
+      - WHATSAPP_ACCOUNT_ID=${WHATSAPP_ACCOUNT_ID:-}
+      - WHATSAPP_CONNECT=${WHATSAPP_CONNECT:-false}
+      - WHATSAPP_ENABLE_WRITES=${WHATSAPP_ENABLE_WRITES:-false}
+      - WHATSAPP_BIND=0.0.0.0
+      - WHATSAPP_PORT=9100
+      - WHATSAPP_ALLOW_REMOTE_BIND=true
     restart: unless-stopped
 
 volumes:

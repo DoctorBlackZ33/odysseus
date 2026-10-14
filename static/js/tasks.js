@@ -25,6 +25,7 @@ let _taskCompletionPending = false;
 let _taskBulkDeleting = false;
 
 const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const _WHATSAPP_TASK_ACTIONS = new Set(['whatsapp_sync', 'whatsapp_send_message']);
 
 function _setTaskFailurePending(active) {
   _taskFailurePending = !!active;
@@ -1213,6 +1214,50 @@ function _showForm(existing, initTaskType, initTriggerType) {
   const curTaskType = existing?.task_type || initTaskType || 'llm';
   const curTriggerType = existing?.trigger_type || initTriggerType || 'schedule';
 
+  async function renderWhatsAppActionOptions(action, extra) {
+    extra.innerHTML = '<div class="memory-desc">Loading WhatsApp accounts…</div>';
+    let saved = {};
+    try {
+      const parsed = JSON.parse(existing?.prompt || '{}');
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) saved = parsed;
+    } catch (_) {}
+    try {
+      const response = await fetch(`${API_BASE}/api/connectors/accounts`, { credentials: 'same-origin' });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || `Request failed (${response.status})`);
+      const accounts = (result.accounts || []).filter(account => account.provider === 'whatsapp');
+      const selectedId = String(saved.account_id || accounts[0]?.id || '');
+      const options = accounts.map(account => {
+        const label = `${account.name || 'WhatsApp'} · ${account.status || 'setup required'}`;
+        return `<option value="${_escHtml(account.id)}" ${String(account.id) === selectedId ? 'selected' : ''}>${_escHtml(label)}</option>`;
+      }).join('');
+      const warning = action === 'whatsapp_send_message'
+        ? `<div class="memory-desc" style="color:var(--red);font-size:11px;margin:5px 0;">Each scheduled run sends this exact message without another confirmation. Delivery may be unknown if WhatsApp cannot return a receipt. WHATSAPP_ENABLE_WRITES must be enabled in both the app and bridge.</div>`
+        : `<div class="memory-desc" style="font-size:11px;margin:5px 0;">This polls the selected account and incrementally updates its owner-scoped history index.</div>`;
+      extra.innerHTML = `
+        <label class="task-form-label">WhatsApp account</label>
+        <select id="task-form-whatsapp-account" class="task-form-input">${options || '<option value="">No WhatsApp account configured</option>'}</select>
+        ${warning}
+        ${action === 'whatsapp_send_message' ? `
+          <label class="task-form-label">Recipient chat ID or phone number</label>
+          <input id="task-form-whatsapp-chat" class="task-form-input" maxlength="256" value="${_escHtml(saved.chat_id || '')}" placeholder="Select a chat ID from WhatsApp history" />
+          <label class="task-form-label">Exact message text</label>
+          <textarea id="task-form-whatsapp-text" class="task-form-input task-form-textarea" rows="4" maxlength="5000" placeholder="This message will be sent on every scheduled run">${_escHtml(saved.text || '')}</textarea>
+          <label class="task-form-label" style="display:flex;align-items:flex-start;gap:7px;margin-top:8px;">
+            <input id="task-form-whatsapp-ack" type="checkbox" style="margin-top:2px">
+            <span>I confirm this task may send the exact message above automatically on every scheduled run.</span>
+          </label>
+        ` : `
+          <label class="task-form-label">Maximum history pages per run</label>
+          <input id="task-form-whatsapp-pages" class="task-form-input" type="number" min="1" max="200" value="${Math.max(1, Math.min(200, Number(saved.max_pages || 20)))}" />
+        `}
+        ${accounts.length ? '' : '<div class="memory-desc" style="color:var(--red);">Add a WhatsApp connector in Settings → Integrations and complete bridge setup before saving this task.</div>'}
+      `;
+    } catch (error) {
+      extra.innerHTML = `<div class="memory-desc" style="color:var(--red);">Could not load WhatsApp accounts: ${_escHtml(error.message || String(error))}. Configure the bridge and try again.</div>`;
+    }
+  }
+
   body.innerHTML = `
     <div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">
       <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
@@ -1314,6 +1359,20 @@ function _showForm(existing, initTaskType, initTriggerType) {
         const extra = document.getElementById('task-form-action-extra');
         if (!sel || !extra) return;
         const action = sel.value;
+        const whatsappAction = _WHATSAPP_TASK_ACTIONS.has(action);
+        const triggerButtons = triggerToggle.querySelectorAll('.task-toggle-btn');
+        triggerButtons.forEach(button => {
+          button.disabled = whatsappAction && button.dataset.val !== 'schedule';
+        });
+        if (whatsappAction && triggerType !== 'schedule') {
+          triggerType = 'schedule';
+          triggerToggle.querySelectorAll('.task-toggle-btn').forEach(button => button.classList.toggle('active', button.dataset.val === triggerType));
+          renderTriggerOpts();
+        }
+        if (whatsappAction) {
+          await renderWhatsAppActionOptions(action, extra);
+          return;
+        }
         if (!_EMAIL_ACCOUNT_ACTIONS.has(action)) {
           extra.innerHTML = '';
           return;
@@ -1357,6 +1416,9 @@ function _showForm(existing, initTaskType, initTriggerType) {
     const btn = e.target.closest('.task-toggle-btn');
     if (!btn) return;
     taskType = btn.dataset.val;
+    if (taskType !== 'action') {
+      triggerToggle.querySelectorAll('.task-toggle-btn').forEach(button => { button.disabled = false; });
+    }
     typeToggle.querySelectorAll('.task-toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.val === taskType));
     renderTypeOpts();
   });
@@ -1721,9 +1783,34 @@ function _showForm(existing, initTaskType, initTriggerType) {
         return;
       }
       payload.action = action;
-      if (_EMAIL_ACCOUNT_ACTIONS.has(action)) {
+      if (_WHATSAPP_TASK_ACTIONS.has(action)) {
+        const accountId = document.getElementById('task-form-whatsapp-account')?.value || '';
+        if (!accountId) {
+          if (uiModule) uiModule.showError('Select a WhatsApp account');
+          return;
+        }
+        if (action === 'whatsapp_send_message') {
+          const chatId = document.getElementById('task-form-whatsapp-chat')?.value?.trim() || '';
+          const text = document.getElementById('task-form-whatsapp-text')?.value?.trim() || '';
+          const acknowledged = !!document.getElementById('task-form-whatsapp-ack')?.checked;
+          if (!chatId || !text || !acknowledged) {
+            if (uiModule) uiModule.showError('Enter the recipient and exact message, then confirm automatic sending');
+            return;
+          }
+          payload.prompt = JSON.stringify({ account_id: accountId, chat_id: chatId, text, scheduled_send_ack: true });
+        } else {
+          const pages = Number(document.getElementById('task-form-whatsapp-pages')?.value || 20);
+          if (!Number.isInteger(pages) || pages < 1 || pages > 200) {
+            if (uiModule) uiModule.showError('WhatsApp history pages must be between 1 and 200');
+            return;
+          }
+          payload.prompt = JSON.stringify({ account_id: accountId, max_pages: pages });
+        }
+      } else if (_EMAIL_ACCOUNT_ACTIONS.has(action)) {
         const accountId = document.getElementById('task-form-email-account')?.value || '';
         payload.prompt = accountId ? JSON.stringify({ account_id: accountId }) : '';
+      } else if (existing && _WHATSAPP_TASK_ACTIONS.has(existing.action)) {
+        payload.prompt = '';
       }
       if (action === 'check_email_urgency') {
         const urgentPrompt = document.getElementById('task-form-urgent-email-prompt')?.value || '';

@@ -121,9 +121,40 @@ _register(
         "list_sessions",
         "tail_serve_output",
         "vault_get",
-        "vault_search",
+        "connector_search",
     },
     ToolEffect.READ_PRIVATE,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"moodle_read", "whatsapp_read"},
+    ToolEffect.READ_PRIVATE,
+    ToolEffect.BROKERED_NETWORK_READ,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"maps_search", "shopping_search"},
+    ToolEffect.BROKERED_NETWORK_READ,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"connector_sync"},
+    ToolEffect.WRITE_PRIVATE,
+    ToolEffect.NETWORK_EGRESS,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"whatsapp_send"},
+    ToolEffect.NETWORK_EGRESS,
+    ToolEffect.EXTERNAL_SIDE_EFFECT,
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
+    {"browser_session"},
+    ToolEffect.READ_PRIVATE,
+    ToolEffect.NETWORK_EGRESS,
+    ToolEffect.UI_SIDE_EFFECT,
+    ToolEffect.EXTERNAL_SIDE_EFFECT,
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
@@ -323,6 +354,7 @@ _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
         "manage_session": frozenset({"list", "switch", "open", "select", "view"}),
         "manage_skills": frozenset({"list", "index", "view", "view_ref", "search"}),
         "manage_tasks": frozenset({"list"}),
+        "browser_session": frozenset({"status", "start", "navigate", "snapshot", "back", "wait"}),
     }
 )
 
@@ -350,6 +382,7 @@ _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
         ),
         "manage_skills": frozenset({"add", "edit", "patch", "publish", "delete"}),
         "manage_tasks": frozenset({"create", "edit", "delete", "pause", "resume", "run"}),
+        "browser_session": frozenset({"click", "fill", "press", "close"}),
     }
 )
 
@@ -470,6 +503,12 @@ def capabilities_for_action(tool_name: Any, content: Any) -> ToolCapabilities:
             known=base.known,
         )
     if action in _PRIVATE_ACTION_READS[tool_name]:
+        if tool_name == "browser_session" and action in {"navigate", "back"}:
+            return ToolCapabilities(
+                frozenset({ToolEffect.READ_PRIVATE, ToolEffect.NETWORK_EGRESS}),
+                ResultIntegrity.EXTERNAL_UNTRUSTED,
+                known=base.known,
+            )
         return _capabilities(
             ToolEffect.READ_PRIVATE,
             result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,

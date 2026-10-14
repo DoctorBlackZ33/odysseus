@@ -22,6 +22,13 @@ secrets.env~
 !secrets.env.example
 /data/
 /logs/
+/whatsapp-bridge/data/
+whatsapp-bridge/test-query*.js
+/whatsapp-bridge/logs/
+/whatsapp-bridge/node_modules/
+/whatsapp-bridge/.env
+/whatsapp-bridge/*.db
+/whatsapp-bridge/*.sqlite
 .git/
 .claude/
 .playwright-mcp/

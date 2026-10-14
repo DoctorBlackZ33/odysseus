@@ -730,30 +730,62 @@ class TaskScheduler:
                 if foreground_active and due:
                     db.commit()
             for task_id in to_dispatch:
-                asyncio.create_task(self._execute_task(task_id))
+                asyncio.create_task(self._execute_task(task_id, scheduled=True))
         finally:
             db.close()
 
-    async def _execute_task(self, task_id: str, *, bypass_model_slot: bool = False, release_executing: bool = True):
+    @staticmethod
+    def _retryable_whatsapp_run(task, run) -> bool:
+        if not task or not run or task.action != "whatsapp_send_message":
+            return False
+        if (
+            (task.trigger_type or "schedule") != "schedule"
+            or not getattr(run, "is_scheduled_occurrence", False)
+            or run.status != "aborted"
+        ):
+            return False
+        error = str(run.error or "")
+        return error.startswith("Server restarted while task was ") or error.startswith("commit_failed:")
+
+
+    async def _execute_task(self, task_id: str, *, bypass_model_slot: bool = False,
+                            release_executing: bool = True, scheduled: bool = False):
         # Create the run record with status="queued" BEFORE waiting on the
         # semaphore so the UI can show that a manually-triggered task is in
-        # line behind another. Once we acquire the slot, flip to "running"
-        # and hand off to _execute_task_locked.
-        from core.database import SessionLocal, TaskRun
+        # line behind another. Only an aborted, persisted scheduled occurrence
+        # may be reused on retry, keeping manual and cron identities separate.
+        from core.database import SessionLocal, ScheduledTask, TaskRun
         current = asyncio.current_task()
         if current:
             self._task_handles[task_id] = current
-        run_id = str(uuid.uuid4())
         _q_db = SessionLocal()
+        run_id = str(uuid.uuid4())
         try:
-            run = TaskRun(
-                id=run_id,
-                task_id=task_id,
-                started_at=_utcnow(),
-                status="queued",
-                result="Queued — waiting for a free slot…",
-            )
-            _q_db.add(run)
+            run = None
+            if scheduled:
+                task = _q_db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                previous = _q_db.query(TaskRun).filter(
+                    TaskRun.task_id == task_id,
+                    TaskRun.is_scheduled_occurrence.is_(True),
+                ).order_by(TaskRun.started_at.desc()).first()
+                if self._retryable_whatsapp_run(task, previous):
+                    run = previous
+                    run_id = run.id
+                    run.status = "queued"
+                    run.error = None
+                    run.finished_at = None
+                    run.started_at = _utcnow()
+                    run.result = "Queued — retrying the same WhatsApp delivery intent…"
+            if run is None:
+                run = TaskRun(
+                    id=run_id,
+                    task_id=task_id,
+                    started_at=_utcnow(),
+                    status="queued",
+                    result="Queued — waiting for a free slot…",
+                    is_scheduled_occurrence=scheduled,
+                )
+                _q_db.add(run)
             _q_db.commit()
         except Exception:
             logger.exception(f"Failed to create queued run row for task {task_id}")
@@ -767,6 +799,7 @@ class TaskScheduler:
                     run_id,
                     release_executing=release_executing,
                     gate_foreground=not bypass_model_slot,
+                    scheduled=scheduled,
                 )
                 return
 
@@ -776,6 +809,7 @@ class TaskScheduler:
                     run_id,
                     release_executing=release_executing,
                     gate_foreground=True,
+                    scheduled=scheduled,
                 )
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
@@ -820,6 +854,7 @@ class TaskScheduler:
         *,
         release_executing: bool = True,
         gate_foreground: bool = True,
+        scheduled: bool = False,
     ):
         from core.database import SessionLocal, ScheduledTask, TaskRun
 
@@ -885,6 +920,7 @@ class TaskScheduler:
                     started_at=_utcnow(),
                     status="running",
                     result="Starting…",
+                    is_scheduled_occurrence=scheduled,
                 )
                 db.add(run)
                 db.commit()
@@ -1262,6 +1298,8 @@ class TaskScheduler:
             # through as `command` so action_cookbook_serve can json.loads it.
             elif task.action == "cookbook_serve" and task.prompt:
                 kwargs["command"] = task.prompt
+            if task.action == "whatsapp_send_message":
+                kwargs["run_id"] = run_id
             result, success = await action_fn(**kwargs)
             return result, success
         except TaskNoop:

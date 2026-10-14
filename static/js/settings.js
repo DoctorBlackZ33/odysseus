@@ -3365,6 +3365,12 @@ const INTG_TYPES = {
   codex:   { label: 'Codex',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 10.696.453a6.023 6.023 0 0 0-5.75 4.172 6.061 6.061 0 0 0-3.946 2.945 6.024 6.024 0 0 0 .742 7.099 5.98 5.98 0 0 0 .516 4.911 6.046 6.046 0 0 0 6.51 2.9A5.996 5.996 0 0 0 13.26 23.547a6.023 6.023 0 0 0 5.75-4.172 6.061 6.061 0 0 0 3.946-2.945 6.024 6.024 0 0 0-.674-6.609zM13.26 21.047a4.508 4.508 0 0 1-2.886-1.041l.143-.082 4.793-2.769a.777.777 0 0 0 .391-.676V10.34l2.026 1.17a.072.072 0 0 1 .039.061v5.596a4.532 4.532 0 0 1-4.506 4.48zM3.968 17.64a4.473 4.473 0 0 1-.537-3.018l.143.086 4.793 2.769a.79.79 0 0 0 .782 0l5.852-3.379v2.34a.072.072 0 0 1-.029.062l-4.845 2.796a4.532 4.532 0 0 1-6.159-1.656zM2.804 7.922a4.49 4.49 0 0 1 2.348-1.973V11.6a.778.778 0 0 0 .391.676l5.852 3.378-2.026 1.17a.072.072 0 0 1-.068 0L4.456 14.03a4.532 4.532 0 0 1-1.652-6.108zm16.423 3.823L13.375 8.367l2.026-1.17a.072.072 0 0 1 .068 0l4.845 2.796a4.525 4.525 0 0 1-.7 8.08V12.42a.778.778 0 0 0-.387-.676zm2.015-3.025l-.143-.086-4.793-2.769a.79.79 0 0 0-.782 0L9.672 9.243V6.903a.072.072 0 0 1 .029-.062l4.845-2.796a4.525 4.525 0 0 1 6.696 4.675zM8.598 12.66L6.57 11.49a.072.072 0 0 1-.039-.061V5.833a4.525 4.525 0 0 1 7.413-3.48l-.143.082-4.793 2.769a.777.777 0 0 0-.391.676l-.019 6.78zm1.1-2.379l2.607-1.505 2.607 1.505v3.01l-2.607 1.505-2.607-1.505z"/></svg>' },
   claude:  { label: 'Claude',  icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/></svg>' },
   vault:   { label: 'Vault',   icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' },
+  moodle:      { label: 'ETH Moodle', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>' },
+  browser:     { label: 'Browser Session', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20"/><path d="M12 2a15 15 0 0 0 0 20"/></svg>' },
+  whatsapp:    { label: 'WhatsApp', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-12.4 7.4L3 20l1.1-5.2A8.4 8.4 0 1 1 21 11.5z"/><path d="M8.5 9.5c.4 2 2 3.6 4 4"/></svg>' },
+  maps:        { label: 'Maps', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>' },
+  gmail_index: { label: 'Gmail Retrieval', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>' },
+  shopping:    { label: 'Shopping Search', icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7"/><path d="m21 21-6-6"/></svg>' },
 };
 
 // Config shared by the Codex Agent and Claude Agent forms. Both use the same
@@ -3425,16 +3431,12 @@ python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py capabilities`,
   },
 };
 
-let _unifiedInited = false;
-
 async function initUnifiedIntegrations() {
-  if (_unifiedInited) return;
-  _unifiedInited = true;
-
   const listEl = el('unified-integrations-list');
+  if (!listEl || listEl._unifiedIntegrationsInitialized) return;
+  listEl._unifiedIntegrationsInitialized = true;
   const formEl = el('unified-intg-form');
   const addBtn = el('unified-intg-add-btn');
-  if (!listEl) return;
   let integrationNotice = '';
 
   // Hide the "+ Add Integration" button whenever the per-type create form
@@ -3457,7 +3459,7 @@ async function initUnifiedIntegrations() {
   }
 
   async function fetchAll() {
-    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes, calendarsRes] = await Promise.all([
+    const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, vaultRes, tokenRes, calendarsRes, connectorRes, gmailIndexRes] = await Promise.all([
       fetch('/api/auth/integrations', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { integrations: [] }).catch(() => ({ integrations: [] })),
       fetch('/api/calendar/config/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
       fetch('/api/contacts/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
@@ -3467,6 +3469,8 @@ async function initUnifiedIntegrations() {
       fetch('/api/vault/config', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : {}).catch(() => ({})),
       fetch('/api/tokens', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : []).catch(() => []),
       fetch('/api/calendar/calendars', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { calendars: [] }).catch(() => ({ calendars: [] })),
+      fetch('/api/connectors/accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
+      fetch('/api/connectors/email-accounts', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { accounts: [] }).catch(() => ({ accounts: [] })),
     ]);
     const items = [];
     // API integrations
@@ -3499,12 +3503,28 @@ async function initUnifiedIntegrations() {
         data: cardRes,
       });
     }
-    // Email — one entry per EmailAccount row
-    for (const acc of (emailAccountsRes.accounts || [])) {
-      const label = acc.name + (acc.is_default ? ' (default)' : '');
-      const detail = [acc.from_address || acc.imap_user, acc.imap_host].filter(Boolean).join(' — ');
-      items.push({ type: 'email', id: acc.id, name: label, detail, enabled: acc.enabled !== false, data: acc });
+    // Gmail retrieval is separate from the existing OAuth/IMAP account and
+    // remains opt-in, with semantic indexing disabled until explicitly chosen.
+    for (const acc of (gmailIndexRes.accounts || [])) {
+      items.push({
+        type: 'gmail_index', id: acc.id, name: `${acc.name || acc.email} retrieval`,
+        detail: `${acc.status || 'setup required'} · ${acc.semantic_index ? 'semantic indexing on' : 'keyword only'}${acc.last_error ? ` · ${acc.last_error}` : ''}`,
+        enabled: acc.status === 'connected', data: acc,
+      });
     }
+    for (const acc of (connectorRes.accounts || [])) {
+      const config = acc.config || {};
+      const detailParts = [acc.status || 'setup required'];
+      if (acc.last_sync_at) detailParts.push(`synced ${new Date(acc.last_sync_at).toLocaleString()}`);
+      if (['moodle', 'whatsapp'].includes(acc.provider)) {
+        detailParts.push(config.semantic_index ? 'semantic indexing on' : 'keyword retrieval');
+        if (config.auto_sync) detailParts.push(`auto-sync every ${Number(config.sync_interval_minutes || 30)} min`);
+      }
+      if (acc.last_error) detailParts.push(acc.last_error);
+      const detail = detailParts.join(' · ');
+      items.push({ type: acc.provider, id: acc.id, name: acc.name, detail, enabled: acc.status === 'connected', data: acc });
+    }
+    items.push({ type: 'shopping', id: 'shopping-search', name: 'Product discovery', detail: 'Public merchant listings · no checkout', enabled: true, data: {} });
     // MCP servers
     const mcpList = Array.isArray(mcpRes) ? mcpRes : (mcpRes.servers || []);
     for (const srv of mcpList) {
@@ -3531,22 +3551,20 @@ async function initUnifiedIntegrations() {
 
   function renderCard(item) {
     const t = INTG_TYPES[item.type] || INTG_TYPES.api;
-    // Static enabled/disabled indicator — same dot every integration
-    // type gets. (The clickable glow-on-test variant for email was
-    // removed earlier; this matches the API/CalDAV/MCP pattern.)
     const statusDot = item.enabled
-      ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-success,#50fa7b);flex-shrink:0;--notif-glow:var(--color-success,#50fa7b);animation:cookbook-notif-pulse 2s ease-in-out infinite;" title="Active"></span>'
+      ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-success,#50fa7b);flex-shrink:0" title="Active"></span>'
       : '<span style="width:8px;height:8px;border-radius:50%;background:var(--fg);opacity:0.3;flex-shrink:0" title="Disabled"></span>';
-    return `<div class="intg-card" data-intg-id="${item.id}" data-intg-type="${item.type}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;cursor:pointer;transition:all 0.15s;" title="Click to edit">
+    const canDelete = !['gmail_index', 'shopping'].includes(item.type);
+    return `<div class="intg-card" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;cursor:pointer;transition:all 0.15s;" title="Click to edit">
       <span style="color:var(--accent, var(--red));flex-shrink:0">${t.icon}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px">${item.name} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${t.label}</span></div>
-        <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${item.detail || ''}</div>
+        <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px">${esc(item.name)} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${esc(t.label)}</span></div>
+        <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.detail)}</div>
       </div>
       ${statusDot}
-      <button class="admin-btn-sm intg-del-btn" data-intg-id="${item.id}" data-intg-type="${item.type}" data-intg-name="${(item.name || '').replace(/"/g, '&quot;')}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
+      ${canDelete ? `<button class="admin-btn-sm intg-del-btn" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" data-intg-name="${esc(item.name)}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-      </button>
+      </button>` : ''}
     </div>`;
   }
 
@@ -3554,53 +3572,41 @@ async function initUnifiedIntegrations() {
     const items = await fetchAll();
     const noticeHtml = integrationNotice ? `
       <div class="intg-followup-note" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:8px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 35%, transparent);border-left:3px solid var(--accent, var(--red));border-radius:5px;background:color-mix(in srgb, var(--accent, var(--red)) 8%, transparent);font-size:11px;">
-        <span style="flex:1;line-height:1.35">${integrationNotice}</span>
+        <span style="flex:1;line-height:1.35">${esc(integrationNotice)}</span>
         <button type="button" class="admin-btn-sm intg-open-email-settings" style="white-space:nowrap;">Email settings</button>
       </div>` : '';
-    if (items.length === 0) {
-      listEl.innerHTML = noticeHtml + '<div style="padding:12px;opacity:0.5;font-size:12px;text-align:center">No integrations configured</div>';
-    } else {
-      listEl.innerHTML = noticeHtml + items.map(renderCard).join('');
-    }
+    listEl.innerHTML = noticeHtml + (items.length
+      ? items.map(renderCard).join('')
+      : '<div style="padding:12px;opacity:0.5;font-size:12px;text-align:center">No integrations configured</div>');
     listEl.querySelector('.intg-open-email-settings')?.addEventListener('click', (e) => {
       e.stopPropagation();
       _openEmailSettings();
     });
-    // Wire edit clicks
     listEl.querySelectorAll('.intg-card').forEach(card => {
       card.addEventListener('click', (e) => {
         if (e.target.closest('.intg-del-btn')) return;
-        const type = card.dataset.intgType;
-        const id = card.dataset.intgId;
-        // Toggle a class instead of mutating inline borderColor — the
-        // inline border shorthand made the reset unreliable, leaving
-        // stale accent borders on previously-clicked cards.
         listEl.querySelectorAll('.intg-card.intg-card-active').forEach(c => c.classList.remove('intg-card-active'));
         card.classList.add('intg-card-active');
-        showForm(type, id);
+        showForm(card.dataset.intgType, card.dataset.intgId);
       });
     });
-    // Wire delete
     listEl.querySelectorAll('.intg-del-btn').forEach(btn => {
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const intgName = btn.dataset.intgName || 'this integration';
-        if (!await window.styledConfirm(`Remove "${intgName}"?`, { confirmText: 'Remove', danger: true })) return;
+        const name = btn.dataset.intgName || 'this integration';
+        if (!await window.styledConfirm(`Remove "${name}"?`, { confirmText: 'Remove', danger: true })) return;
         const type = btn.dataset.intgType;
         const id = btn.dataset.intgId;
         try {
           if (type === 'api') await fetch(`/api/auth/integrations/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'caldav') await fetch(`/api/calendar/config/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
-          else if (type === 'contacts') {
-            await fetch('/api/contacts/clear', { method: 'DELETE', credentials: 'same-origin' });
-          }
-          else if (type === 'carddav') {
-            await fetch('/api/contacts/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ carddav_url: '', carddav_username: '', carddav_password: '' }) });
-          }
+          else if (type === 'contacts') await fetch('/api/contacts/clear', { method: 'DELETE', credentials: 'same-origin' });
+          else if (type === 'carddav') await fetch('/api/contacts/config', { method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ carddav_url: '', carddav_username: '', carddav_password: '' }) });
           else if (type === 'email') await fetch(`/api/email/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'mcp') await fetch(`/api/mcp/servers/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'codex' || type === 'claude') await fetch(`/api/tokens/${id}`, { method: 'DELETE', credentials: 'same-origin' });
           else if (type === 'vault') await fetch('/api/vault/logout', { method: 'POST', credentials: 'same-origin' });
+          else if (['moodle', 'whatsapp', 'maps', 'browser'].includes(type)) await fetch(`/api/connectors/accounts/${id}`, { method: 'DELETE', credentials: 'same-origin' });
         } catch (_) {}
         formEl.style.display = 'none';
         await renderList();
@@ -3619,6 +3625,526 @@ async function initUnifiedIntegrations() {
     else if (type === 'codex') showAgentForm('codex', editId);
     else if (type === 'claude') showAgentForm('claude', editId);
     else if (type === 'vault') showVaultForm();
+    else if (type === 'gmail_index') showGmailIndexForm(editId);
+    else if (['moodle', 'whatsapp', 'maps', 'browser'].includes(type)) showPersonalConnectorForm(type, editId);
+    else if (type === 'shopping') showShoppingSearchForm();
+  }
+
+
+  async function connectorRequest(url, options = {}) {
+    const response = await fetch(url, { credentials: 'same-origin', ...options });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || `Request failed (${response.status})`);
+    return result;
+  }
+
+  function showConnectorOutput(target, value, error = false) {
+    const node = typeof target === 'string' ? el(target) : target;
+    if (!node) return;
+    node.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    node.style.color = error ? 'var(--red)' : '';
+  }
+
+  async function showGmailIndexForm(emailAccountId) {
+    let account;
+    try {
+      const data = await connectorRequest('/api/connectors/email-accounts');
+      account = (data.accounts || []).find(item => item.id === emailAccountId);
+    } catch (err) {
+      formEl.innerHTML = `<div class="admin-card" style="margin-top:8px">${esc(err.message)}</div>`;
+      return;
+    }
+    if (!account) {
+      formEl.innerHTML = '<div class="admin-card" style="margin-top:8px">Connect an email account in Email settings before enabling retrieval.</div>';
+      return;
+    }
+    formEl.innerHTML = `
+      <div class="admin-card" style="margin-top:8px">
+        <h2 style="font-size:13px">Gmail retrieval · ${esc(account.name || account.email)}</h2>
+        <p style="font-size:11px;opacity:.7">Indexes mail from your existing owner-scoped email account. Semantic indexing is optional; keyword retrieval remains available without embeddings.</p>
+        <label class="settings-row"><span class="settings-label">Semantic indexing</span><input id="uf-gmail-semantic" type="checkbox" ${account.semantic_index ? 'checked' : ''}></label>
+        <label class="settings-row"><span class="settings-label">Automatic sync</span><input id="uf-gmail-auto" type="checkbox" ${account.auto_sync ? 'checked' : ''}></label>
+        <label class="settings-row"><span class="settings-label">Sync interval (minutes)</span><input id="uf-gmail-interval" class="settings-input" type="number" min="5" max="1440" value="${Number(account.sync_interval_minutes || 30)}"></label>
+        <div id="uf-gmail-output" style="white-space:pre-wrap;font:11px monospace;max-height:180px;overflow:auto"></div>
+        <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:8px">
+          <button type="button" class="admin-btn-add" id="uf-gmail-sync">Sync now</button>
+          <button type="button" class="admin-btn-add" id="uf-gmail-save">Save</button>
+        </div>
+      </div>`;
+    el('uf-gmail-save').addEventListener('click', async () => {
+      try {
+        const interval = Number(el('uf-gmail-interval').value);
+        await connectorRequest(`/api/connectors/email-accounts/${encodeURIComponent(emailAccountId)}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            semantic_index: el('uf-gmail-semantic').checked,
+            auto_sync: el('uf-gmail-auto').checked,
+            sync_interval_minutes: interval,
+          }),
+        });
+        showConnectorOutput('uf-gmail-output', 'Settings saved.');
+        await renderList();
+      } catch (err) { showConnectorOutput('uf-gmail-output', err.message, true); }
+    });
+    el('uf-gmail-sync').addEventListener('click', async () => {
+      try {
+        showConnectorOutput('uf-gmail-output', await connectorRequest(`/api/connectors/email-accounts/${encodeURIComponent(emailAccountId)}/sync`, { method: 'POST' }));
+        await renderList();
+      } catch (err) { showConnectorOutput('uf-gmail-output', err.message, true); }
+    });
+  }
+
+  async function showPersonalConnectorForm(type, editId) {
+    const labels = {
+      moodle: { title: 'ETH Moodle', key: 'moodle_token', label: 'Authorized Moodle web-service token' },
+      whatsapp: { title: 'WhatsApp', key: '', label: '' },
+      maps: { title: 'Maps', key: 'api_key', label: 'OpenRouteService API key' },
+      browser: { title: 'Browser Session', key: '', label: '' },
+    };
+    const spec = labels[type];
+    let account = null;
+    if (editId) {
+      try {
+        const data = await connectorRequest('/api/connectors/accounts');
+        account = (data.accounts || []).find(item => item.id === editId) || null;
+      } catch (err) {
+        formEl.innerHTML = `<div class="admin-card" style="margin-top:8px">${esc(err.message)}</div>`;
+        return;
+      }
+    }
+    if (editId && !account) {
+      formEl.innerHTML = '<div class="admin-card" style="margin-top:8px">Connector account not found.</div>';
+      return;
+    }
+    const maps = type === 'maps';
+    const whatsapp = type === 'whatsapp';
+    const browser = type === 'browser';
+    const syncable = ['moodle', 'whatsapp'].includes(type);
+    const credentialLabel = spec.label;
+    formEl.innerHTML = `
+      <div class="admin-card" style="margin-top:8px">
+        <h2 style="font-size:13px">${editId ? `Edit ${spec.title}` : `Add ${spec.title}`}</h2>
+        ${whatsapp ? '<p style="font-size:11px;opacity:.7">Requires the separately configured private WhatsApp bridge. Pair by scanning its QR code; do not enter WhatsApp credentials here. Message sends stay disabled unless WHATSAPP_ENABLE_WRITES=true in both the app and bridge environments.</p>' : ''}
+        ${type === 'moodle' ? '<p style="font-size:11px;opacity:.7">Use an authorized Moodle web-service token, or start ETH Shibboleth/MFA login, inspect the page, and explicitly fill or click its sign-in controls here. Password values pass transiently through the Odysseus backend for one HTTPS field fill; they are not saved as connector credentials. Complete MFA yourself.</p>' : ''}
+        ${browser ? '<p style="font-size:11px;opacity:.7">Creates an owner-isolated Playwright profile. Use explicit Settings controls to sign in; password values pass transiently through the Odysseus backend for one HTTPS field fill and are not saved as connector credentials. Session cookies are encrypted for your account. Private-network targets and purchase/cart/checkout/payment actions are blocked.</p>' : ''}
+        <label class="settings-row"><span class="settings-label">Name</span><input id="uf-connector-name" class="settings-input" maxlength="120" value="${esc(account?.name || spec.title)}"></label>
+        ${credentialLabel ? `<label class="settings-row"><span class="settings-label">${esc(credentialLabel)}</span><input id="uf-connector-secret" class="settings-input" type="password" autocomplete="new-password" placeholder="${editId ? 'Leave blank to keep the saved secret' : 'Required for API access'}"></label>` : ''}
+        ${syncable ? `<label class="settings-row"><span class="settings-label">Semantic indexing</span><input id="uf-connector-semantic" type="checkbox" ${account?.config?.semantic_index ? 'checked' : ''}></label>
+        <label class="settings-row"><span class="settings-label">Sync interval (minutes)</span><input id="uf-connector-interval" class="settings-input" type="number" min="5" max="1440" value="${Number(account?.config?.sync_interval_minutes || 30)}"></label>` : ''}
+        ${syncable ? `<label class="settings-row"><span class="settings-label">Automatic sync</span><input id="uf-connector-auto" type="checkbox" ${account?.config?.auto_sync ? 'checked' : ''}></label>` : ''}
+        ${account ? '<div id="uf-connector-actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"></div>' : ''}
+        <div id="uf-connector-output" style="white-space:pre-wrap;font:11px monospace;max-height:220px;overflow:auto;margin-top:8px"></div>
+        <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:8px">
+          <button type="button" class="admin-btn-add" id="uf-connector-save">${editId ? 'Save' : 'Add'}</button>
+        </div>
+      </div>`;
+    const output = el('uf-connector-output');
+    el('uf-connector-save').addEventListener('click', async () => {
+      try {
+        const name = el('uf-connector-name').value.trim();
+        if (!name) throw new Error('Name is required.');
+        const secret = credentialLabel ? el('uf-connector-secret').value.trim() : '';
+        if (!editId && credentialLabel && type === 'maps' && !secret) throw new Error('An OpenRouteService API key is required.');
+        const credentials = secret ? { [spec.key]: secret } : {};
+        const options = { headers: { 'Content-Type': 'application/json' } };
+        let result;
+        if (editId) {
+          const body = { name };
+          if (syncable) {
+            body.auto_sync = el('uf-connector-auto').checked;
+            body.sync_interval_minutes = Number(el('uf-connector-interval').value);
+            body.semantic_index = el('uf-connector-semantic').checked;
+          }
+          if (secret) body.credentials = credentials;
+          result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(editId)}`, {
+            ...options, method: 'PATCH', body: JSON.stringify(body),
+          });
+        } else {
+          result = await connectorRequest('/api/connectors/accounts', {
+            ...options, method: 'POST',
+            body: JSON.stringify({ provider: type, name, credentials, auto_sync: syncable && el('uf-connector-auto').checked }),
+          });
+          showConnectorOutput(output, 'Connector added. Open its card to configure account actions.');
+        }
+        await renderList();
+        if (result.account?.id && !editId) showForm(type, result.account.id);
+      } catch (err) { showConnectorOutput(output, err.message, true); }
+    });
+    if (account) await renderConnectorActions(type, account);
+  }
+
+  async function renderConnectorActions(type, account) {
+    const actions = el('uf-connector-actions');
+    const output = el('uf-connector-output');
+    if (!actions || !output) return;
+    const id = encodeURIComponent(account.id);
+    const actionButton = (label, callback) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'admin-btn-add';
+      button.textContent = label;
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try { await callback(); } catch (err) { showConnectorOutput(output, err.message, true); }
+        finally { button.disabled = false; }
+      });
+      actions.appendChild(button);
+    };
+    const get = url => connectorRequest(url);
+    const browserAction = body => connectorRequest(`/api/connectors/accounts/${id}/browser/action`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const moodleBrowserAction = body => connectorRequest(`/api/connectors/accounts/${id}/moodle/browser/action`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (type === 'browser') {
+      const address = document.createElement('input');
+      address.className = 'settings-input';
+      address.placeholder = 'Public URL (https://...)';
+      address.setAttribute('aria-label', 'Browser URL');
+      address.type = 'url';
+      const selector = document.createElement('input');
+      selector.className = 'settings-input';
+      selector.placeholder = 'CSS selector';
+      selector.setAttribute('aria-label', 'Browser CSS selector');
+      const value = document.createElement('input');
+      value.className = 'settings-input';
+      value.placeholder = 'Field value (entered by you)';
+      value.setAttribute('aria-label', 'Browser field value');
+      const valueType = document.createElement('select');
+      valueType.className = 'settings-input';
+      valueType.setAttribute('aria-label', 'Browser field value type');
+      valueType.add(new Option('Text field', 'text'));
+      valueType.add(new Option('Password field (user only)', 'password'));
+      valueType.addEventListener('change', () => { value.type = valueType.value; });
+      value.addEventListener('input', () => { if (valueType.value === 'password') value.type = 'password'; });
+      const key = document.createElement('select');
+      key.className = 'settings-input';
+      key.setAttribute('aria-label', 'Browser key');
+      ['Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Space']
+        .forEach(item => key.add(new Option(item, item)));
+      actions.append(address, selector, valueType, value, key);
+      actionButton('Start session', async () => showConnectorOutput(output, await browserAction({ action: 'start' })));
+      actionButton('Session status', async () => showConnectorOutput(output, await browserAction({ action: 'status' })));
+      actionButton('Navigate', async () => {
+        const target = address.value.trim();
+        if (!target) throw new Error('Enter a public HTTP or HTTPS URL.');
+        showConnectorOutput(output, await browserAction({ action: 'navigate', url: target }));
+      });
+      actionButton('Read page', async () => showConnectorOutput(output, await browserAction({ action: 'snapshot' })));
+      actionButton('Click selector', async () => {
+        if (!selector.value.trim()) throw new Error('Enter a CSS selector.');
+        showConnectorOutput(output, await browserAction({ action: 'click', selector: selector.value.trim() }));
+      });
+      actionButton('Fill selector', async () => {
+        if (!selector.value.trim()) throw new Error('Enter a CSS selector.');
+        const fieldValue = value.value;
+        try {
+          showConnectorOutput(output, await browserAction({ action: 'fill', selector: selector.value.trim(), value: fieldValue }));
+        } finally {
+          value.value = '';
+        }
+      });
+      actionButton('Press key', async () => showConnectorOutput(output, await browserAction({ action: 'press', key: key.value })));
+      actionButton('Back', async () => showConnectorOutput(output, await browserAction({ action: 'back' })));
+      actionButton('Download current URL', async () => {
+        const target = address.value.trim();
+        if (!target) throw new Error('Enter a public file URL.');
+        const link = document.createElement('a');
+        link.href = `/api/connectors/accounts/${id}/browser/download?url=${encodeURIComponent(target)}`;
+        link.download = '';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      });
+      actionButton('Close session', async () => showConnectorOutput(output, await browserAction({ action: 'close' })));
+    } else if (type === 'moodle') {
+      const selector = document.createElement('input');
+      selector.className = 'settings-input';
+      selector.placeholder = 'CSS selector for one Moodle control';
+      selector.setAttribute('aria-label', 'Moodle browser CSS selector');
+      const fieldValue = document.createElement('input');
+      fieldValue.className = 'settings-input';
+      fieldValue.placeholder = 'Value entered by you (cleared after action)';
+      fieldValue.setAttribute('aria-label', 'Moodle browser field value');
+      const valueType = document.createElement('select');
+      valueType.className = 'settings-input';
+      valueType.setAttribute('aria-label', 'Moodle browser field value type');
+      valueType.add(new Option('Text field', 'text'));
+      valueType.add(new Option('Password field (HTTPS only)', 'password'));
+      valueType.addEventListener('change', () => { fieldValue.type = valueType.value; });
+      fieldValue.addEventListener('input', () => {
+        if (valueType.value === 'password') fieldValue.type = 'password';
+      });
+      actions.append(selector, valueType, fieldValue);
+      actionButton('Start ETH login', async () => showConnectorOutput(output, await connectorRequest(`/api/connectors/accounts/${id}/moodle/browser-login`, { method: 'POST' })));
+      actionButton('Read login page', async () => showConnectorOutput(output, await moodleBrowserAction({ action: 'snapshot' })));
+      actionButton('Fill selected field', async () => {
+        if (!selector.value.trim()) throw new Error('Enter one CSS selector from the login page controls.');
+        const entered = fieldValue.value;
+        try {
+          showConnectorOutput(output, await moodleBrowserAction({
+            action: 'fill', selector: selector.value.trim(), value: entered,
+          }));
+        } finally {
+          fieldValue.value = '';
+        }
+      });
+      actionButton('Click selected control', async () => {
+        if (!selector.value.trim()) throw new Error('Enter one CSS selector from the login page controls.');
+        showConnectorOutput(output, await moodleBrowserAction({
+          action: 'click', selector: selector.value.trim(),
+        }));
+      });
+      actionButton('Back', async () => showConnectorOutput(output, await moodleBrowserAction({ action: 'back' })));
+      actionButton('Close ETH session', async () => showConnectorOutput(output, await moodleBrowserAction({ action: 'close' })));
+      actionButton('Courses', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/moodle/courses`)));
+      actionButton('Calendar', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/moodle/calendar`)));
+      const courseId = document.createElement('input');
+      courseId.className = 'settings-input';
+      courseId.placeholder = 'Enrolled Moodle course ID';
+      courseId.setAttribute('aria-label', 'Moodle course ID');
+      courseId.maxLength = 32;
+      const contents = document.createElement('button');
+      contents.type = 'button'; contents.className = 'admin-btn-add'; contents.textContent = 'Read course contents';
+      contents.addEventListener('click', async () => {
+        try {
+          const value = courseId.value.trim();
+          if (!/^\d+$/.test(value)) throw new Error('Enter the numeric ID of one of your enrolled courses.');
+          showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/moodle/courses/${encodeURIComponent(value)}/contents`));
+        } catch (err) { showConnectorOutput(output, err.message, true); }
+      });
+      actions.append(courseId, contents);
+      actionButton('Sync courses/files', async () => {
+        const result = await connectorRequest(`/api/connectors/accounts/${id}/sync`, { method: 'POST' });
+        showConnectorOutput(output, result);
+        await renderList();
+      });
+      actionButton('Login status', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/status`)));
+    } else if (type === 'whatsapp') {
+      actionButton('Pair / QR code', async () => {
+        const result = await get(`/api/connectors/accounts/${id}/whatsapp/pairing`);
+        output.textContent = JSON.stringify(result, null, 2);
+        if (result.qr_data_url) {
+          const image = document.createElement('img');
+          image.src = result.qr_data_url;
+          image.alt = 'WhatsApp pairing QR code';
+          image.style.cssText = 'display:block;max-width:240px;margin:8px auto';
+          output.appendChild(image);
+        }
+      });
+      actionButton('Sync history', async () => {
+        const result = await connectorRequest(`/api/connectors/accounts/${id}/sync?max_pages=200`, { method: 'POST' });
+        showConnectorOutput(output, result);
+        await renderList();
+      });
+      actionButton('Bridge status', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/status`)));
+      actionButton('History progress', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/whatsapp/history`)));
+      actionButton('List chats', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/whatsapp/chats?limit=100`)));
+      const chat = document.createElement('input');
+      chat.className = 'settings-input';
+      chat.placeholder = 'WhatsApp chat ID';
+      chat.setAttribute('aria-label', 'WhatsApp chat ID');
+      chat.style.marginTop = '8px';
+      const read = document.createElement('button');
+      read.type = 'button'; read.className = 'admin-btn-add'; read.textContent = 'Read messages';
+      read.addEventListener('click', async () => {
+        try {
+          if (!chat.value.trim()) throw new Error('Enter a chat ID.');
+          const url = `/api/connectors/accounts/${id}/whatsapp/messages?chat_id=${encodeURIComponent(chat.value.trim())}&limit=100`;
+          showConnectorOutput(output, await get(url));
+        } catch (err) { showConnectorOutput(output, err.message, true); }
+      });
+      const text = document.createElement('textarea');
+      text.className = 'settings-input';
+      text.placeholder = 'Message text';
+      text.setAttribute('aria-label', 'WhatsApp message text');
+      text.rows = 3;
+      text.style.marginTop = '8px';
+      const send = document.createElement('button');
+      send.type = 'button'; send.className = 'admin-btn-add'; send.textContent = 'Send message';
+      let pendingSend = null;
+      send.addEventListener('click', async () => {
+        const chatId = chat.value.trim();
+        const message = text.value.trim();
+        try {
+          if (!chatId || !message) throw new Error('Enter a chat ID and message.');
+          const intent = `${account.id}\0${chatId}\0${message}`;
+          if (!pendingSend || pendingSend.intent !== intent) {
+            const key = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            pendingSend = { intent, key };
+          }
+          if (!await window.styledConfirm(`Send this message to ${chatId}?`, { confirmText: 'Send', danger: true })) return;
+          send.disabled = true;
+          const result = await connectorRequest(`/api/connectors/accounts/${id}/whatsapp/send`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, text: message, idempotency_key: pendingSend.key }),
+          });
+          const delivery = result?.status || result?.result?.status;
+          if (delivery !== 'unknown') {
+            text.value = '';
+            pendingSend = null;
+          }
+          showConnectorOutput(output, delivery === 'unknown'
+            ? { ...result, retry: 'Delivery is unknown. Retry the unchanged message to reuse the same idempotency key.' }
+            : result);
+        } catch (err) { showConnectorOutput(output, err.message, true); }
+        finally { send.disabled = false; }
+      });
+      const search = document.createElement('input');
+      search.className = 'settings-input';
+      search.placeholder = 'Search WhatsApp history';
+      search.setAttribute('aria-label', 'Search WhatsApp history');
+      const searchButton = document.createElement('button');
+      searchButton.type = 'button'; searchButton.className = 'admin-btn-add'; searchButton.textContent = 'Search';
+      searchButton.addEventListener('click', async () => {
+        try {
+          const query = search.value.trim();
+          if (!query) throw new Error('Enter a search term.');
+          const params = new URLSearchParams({ query, limit: '100' });
+          if (chat.value.trim()) params.set('chat_id', chat.value.trim());
+          showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/whatsapp/search?${params}`));
+        } catch (err) { showConnectorOutput(output, err.message, true); }
+      });
+      const backfill = document.createElement('button');
+      backfill.type = 'button'; backfill.className = 'admin-btn-add'; backfill.textContent = 'Backfill this chat';
+      backfill.addEventListener('click', async () => {
+        try {
+          const chatId = chat.value.trim();
+          if (!chatId) throw new Error('Enter a chat ID.');
+          const result = await connectorRequest(`/api/connectors/accounts/${id}/whatsapp/history/backfill`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, count: 100, max_pages: 20, max_messages: 2000, timeout_ms: 60000 }),
+          });
+          showConnectorOutput(output, result);
+        } catch (err) { showConnectorOutput(output, err.message, true); }
+      });
+      actions.append(chat, read, search, searchButton, backfill, text, send);
+      actionButton('Sync archived records', async () => {
+        const result = await connectorRequest(`/api/connectors/accounts/${id}/sync?max_pages=200&batch_size=200`, { method: 'POST' });
+        showConnectorOutput(output, result);
+        await renderList();
+      });
+    } else if (type === 'maps') {
+      const query = document.createElement('input');
+      query.className = 'settings-input';
+      query.placeholder = 'Place to find';
+      const geocode = document.createElement('button');
+      geocode.type = 'button'; geocode.className = 'admin-btn-add'; geocode.textContent = 'Find place';
+      geocode.addEventListener('click', async () => {
+        try {
+          if (!query.value.trim()) throw new Error('Enter a place or address.');
+          showConnectorOutput(output, await connectorRequest('/api/connectors/maps/geocode', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: query.value.trim(), account_id: account.id }),
+          }));
+        } catch (err) { showConnectorOutput(output, err.message, true); }
+      });
+      const from = document.createElement('input'); from.className = 'settings-input'; from.placeholder = 'Route origin';
+      const to = document.createElement('input'); to.className = 'settings-input'; to.placeholder = 'Route destination';
+      const directions = document.createElement('button');
+      directions.type = 'button'; directions.className = 'admin-btn-add'; directions.textContent = 'Directions';
+      directions.addEventListener('click', async () => {
+        try {
+          if (!from.value.trim() || !to.value.trim()) throw new Error('Enter both route locations.');
+          showConnectorOutput(output, await connectorRequest('/api/connectors/maps/directions', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ origin: from.value.trim(), destination: to.value.trim(), account_id: account.id }),
+          }));
+        } catch (err) { showConnectorOutput(output, err.message, true); }
+      });
+      actions.append(query, geocode, from, to, directions);
+    }
+  }
+
+  function showShoppingSearchForm() {
+    formEl.innerHTML = `
+      <div class="admin-card" style="margin-top:8px">
+        <h2 style="font-size:13px">Shopping search</h2>
+        <p style="font-size:11px;opacity:.7">Searches public product listings. Merchant links are a manual handoff; this integration never purchases, enters a cart, or pays.</p>
+        <div style="display:flex;gap:6px"><input id="uf-shopping-query" class="settings-input" placeholder="What are you looking for?"><button type="button" class="admin-btn-add" id="uf-shopping-search">Search</button></div>
+        <div id="uf-shopping-output" style="max-height:360px;overflow:auto;margin-top:8px"></div>
+      </div>`;
+    const output = el('uf-shopping-output');
+    const safeHttpUrl = raw => {
+      try {
+        const parsed = new URL(String(raw || ''));
+        return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+      } catch (_) { return ''; }
+    };
+    el('uf-shopping-search').addEventListener('click', async () => {
+      const query = el('uf-shopping-query').value.trim();
+      if (!query) return showConnectorOutput(output, 'Enter a product or query.', true);
+      output.textContent = 'Searching public merchant listings…';
+      try {
+        const result = await connectorRequest(`/api/connectors/shopping/search?query=${encodeURIComponent(query)}`);
+        output.replaceChildren();
+        const note = document.createElement('p');
+        note.style.cssText = 'font-size:11px;opacity:.7';
+        note.textContent = result.price_note || 'Prices may be stale; verify on the merchant page.';
+        output.appendChild(note);
+        const products = Array.isArray(result.products) ? result.products : [];
+        if (!products.length) {
+          const empty = document.createElement('p');
+          empty.textContent = 'No verifiable product pages were returned.';
+          output.appendChild(empty);
+        }
+        products.forEach(product => {
+          const card = document.createElement('div');
+          card.style.cssText = 'padding:9px;margin:6px 0;border:1px solid var(--border);border-radius:7px';
+          const title = document.createElement('div');
+          title.style.fontWeight = '600';
+          title.textContent = String(product.title || 'Product');
+          card.appendChild(title);
+          const offer = product.offer || {};
+          const details = [offer.price && `${offer.price} ${offer.currency || ''}`.trim(), offer.seller, offer.availability]
+            .filter(Boolean).join(' · ');
+          if (details) {
+            const meta = document.createElement('div');
+            meta.style.cssText = 'font-size:11px;opacity:.7;margin-top:3px';
+            meta.textContent = details;
+            card.appendChild(meta);
+          }
+          if (product.description) {
+            const description = document.createElement('div');
+            description.style.cssText = 'font-size:11px;margin-top:4px';
+            description.textContent = String(product.description);
+            card.appendChild(description);
+          }
+          const merchantUrl = safeHttpUrl(product.merchant_url);
+          if (merchantUrl) {
+            const link = document.createElement('a');
+            link.href = merchantUrl;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = 'Open merchant page';
+            link.style.cssText = 'display:inline-block;margin:7px 10px 0 0;font-size:11px';
+            card.appendChild(link);
+            const handoff = document.createElement('button');
+            handoff.type = 'button';
+            handoff.className = 'admin-btn-add';
+            handoff.textContent = 'Open in Browser Session';
+            handoff.addEventListener('click', async () => {
+              handoff.disabled = true;
+              try {
+                const accounts = await connectorRequest('/api/connectors/accounts');
+                const browser = (accounts.accounts || []).find(account => account.provider === 'browser');
+                if (!browser) throw new Error('Add a Browser Session in Settings > Integrations before using authenticated merchant browsing.');
+                const browserId = encodeURIComponent(browser.id);
+                const navigation = await connectorRequest(`/api/connectors/accounts/${browserId}/browser/action`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ action: 'navigate', url: merchantUrl }),
+                });
+                showConnectorOutput(output, navigation);
+              } catch (err) { showConnectorOutput(output, err.message, true); }
+              finally { handoff.disabled = false; }
+            });
+            card.appendChild(handoff);
+          }
+          output.appendChild(card);
+        });
+      } catch (err) { showConnectorOutput(output, err.message, true); }
+    });
   }
 
   // ── API form ──
@@ -5519,6 +6045,11 @@ async function initUnifiedIntegrations() {
       ['carddav', 'Contacts (CardDAV)'],
       ['contacts', 'Contacts Import'],
       ['email', 'Email (IMAP/SMTP)'],
+      ['moodle', 'ETH Moodle'],
+      ['browser', 'Browser Session'],
+      ['whatsapp', 'WhatsApp'],
+      ['maps', 'Maps'],
+      ['shopping', 'Shopping Search'],
       ['mcp', 'MCP Tool Server'],
     ];
     const _iconFor = (k) => (INTG_TYPES[k]?.icon || '').replace(/width="14"/, 'width="16"').replace(/height="14"/, 'height="16"');
@@ -5563,7 +6094,7 @@ async function initUnifiedIntegrations() {
           const k = btn.dataset.value;
           _closeMenu();
           formEl.style.display = '';
-          showForm(k, 'new');
+          showForm(k, null);
         });
       });
       _closeMenu = bindMenuDismiss(menu, () => { menu.remove(); _menuEl = null; }, (ev) => !menu.contains(ev.target) && ev.target !== addBtn);

@@ -1,6 +1,6 @@
 import asyncio
 
-from sqlalchemy import Column, DateTime, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
@@ -30,6 +30,7 @@ def _setup_db(tmp_path, monkeypatch):
         result = Column(Text)
         error = Column(Text)
         model = Column(String)
+        is_scheduled_occurrence = Column(Boolean, nullable=False, default=False)
 
     engine = create_engine(f"sqlite:///{tmp_path / 'tasks.db'}")
     base.metadata.create_all(engine)

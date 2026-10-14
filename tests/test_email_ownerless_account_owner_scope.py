@@ -115,3 +115,63 @@ def test_get_email_config_resolves_ownerless_account_on_mailbox_match():
     with mock.patch("core.database.SessionLocal", Factory):
         cfg = eh._get_email_config(account_id="acct-legacy", owner="alice@corp.com")
     assert cfg.get("account_id") == "acct-legacy"
+
+
+def test_deleting_claimed_ownerless_email_cleans_only_claiming_users_index(monkeypatch):
+    import asyncio
+
+    import core.database as database
+    from routes import email_routes
+    from services import connector_store
+
+    factory = _make_db()
+    engine = factory.kw["bind"]
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    monkeypatch.setattr(connector_store, "SessionLocal", factory)
+    monkeypatch.setattr(email_routes, "_start_poller", lambda: None)
+    _make_account(
+        factory, "legacy-alice-mail", owner="", imap_user="alice@corp.com",
+        from_address="alice@corp.com",
+    )
+    alice_index = connector_store.create_account(
+        "alice@corp.com", "gmail", "Alice mail index",
+        config={"email_account_id": "legacy-alice-mail"},
+    )
+    bob_index = connector_store.create_account(
+        "bob", "gmail", "Bob mail index",
+        config={"email_account_id": "legacy-alice-mail"},
+    )
+    alice_source = connector_store.upsert_source_record(
+        "alice@corp.com", "gmail", "alice-message",
+        account_id="legacy-alice-mail", title="Alice message",
+        content="Alice private message",
+    )
+    bob_source = connector_store.upsert_source_record(
+        "bob", "gmail", "bob-message",
+        account_id="legacy-alice-mail", title="Bob message",
+        content="Bob private message",
+    )
+    legacy_source = connector_store.upsert_source_record(
+        "", "gmail", "legacy-message", account_id="legacy-alice-mail",
+        content="Legacy indexed message",
+    )
+
+    router = email_routes.setup_email_routes()
+    endpoint = next(
+        route.endpoint for route in router.routes
+        if getattr(route, "path", "") == "/api/email/accounts/{account_id}"
+        and "DELETE" in getattr(route, "methods", set())
+    )
+    try:
+        assert asyncio.run(endpoint("legacy-alice-mail", owner="alice@corp.com")) == {"ok": True}
+        assert connector_store.get_source_record("alice@corp.com", alice_source["id"]) is None
+        assert connector_store.get_source_record("", legacy_source["id"]) is None
+        assert connector_store.get_source_record("bob", bob_source["id"]) is not None
+        assert connector_store.get_account(
+            "alice@corp.com", alice_index["id"], provider="gmail",
+        ) is None
+        assert connector_store.get_account("bob", bob_index["id"], provider="gmail")
+    finally:
+        if engine is not None:
+            engine.dispose()

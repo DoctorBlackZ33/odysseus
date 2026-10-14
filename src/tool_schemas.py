@@ -1293,6 +1293,163 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "connector_search",
+            "description": "Search your owner-scoped indexed Gmail, ETH Moodle, and WhatsApp records with source citations. Keyword search works without embeddings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "providers": {"type": "array", "items": {"type": "string", "enum": ["gmail", "moodle", "whatsapp"]}},
+                    "account_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "source_type": {"type": "string"},
+                    "since": {"type": "string"},
+                    "until": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 30}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "connector_sync",
+            "description": "Sync owner-owned Gmail, Moodle, or WhatsApp source updates into shared retrieval. WhatsApp coverage can remain partial when history is unavailable.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "enum": ["gmail", "moodle", "whatsapp"]},
+                    "account_id": {"type": "string"},
+                    "message_budget": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    "max_pages": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "batch_size": {"type": "integer", "minimum": 1, "maximum": 200}
+                },
+                "required": ["provider", "account_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "moodle_read",
+            "description": "Read courses, Moodle course contents, calendar events, or an indexed permitted course file. Authenticate using your own ETH Shibboleth browser session or legitimate user-authorized web-service token; never submit an ETH password.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["courses", "contents", "calendar", "file"]},
+                    "account_id": {"type": "string"},
+                    "course_id": {"type": "string"},
+                    "start": {"type": "integer"},
+                    "end": {"type": "integer"},
+                    "record_id": {"type": "string"}
+                },
+                "required": ["action", "account_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "whatsapp_read",
+            "description": "Read your WhatsApp status/history progress, chats, messages, search results, or bounded history backfill. Reports incomplete provider coverage honestly.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["status", "history", "chats", "messages", "search", "backfill", "context"]},
+                    "account_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "message_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "sender": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "cursor": {"type": "string"},
+                    "before": {"type": "string"},
+                    "after": {"type": "string"},
+                    "since": {"type": "string"},
+                    "until": {"type": "string"},
+                    "count": {"type": "integer", "minimum": 1, "maximum": 1000},
+                    "max_pages": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "max_messages": {"type": "integer", "minimum": 1, "maximum": 10000},
+                    "timeout_ms": {"type": "integer", "minimum": 1000, "maximum": 300000}
+                },
+                "required": ["action", "account_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "whatsapp_send",
+            "description": "Send a WhatsApp message only when the user explicitly asks to send it now and confirms the exact recipient and text. A real person will receive this message.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "string"},
+                    "chat_id": {"type": "string"},
+                    "text": {"type": "string"}
+                },
+                "required": ["account_id", "chat_id", "text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "maps_search",
+            "description": "Geocode a place/address or calculate a route using configured OpenRouteService. Includes OpenStreetMap attribution and does not track live location.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["geocode", "directions"]},
+                    "account_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "origin": {"type": "string"},
+                    "destination": {"type": "string"},
+                    "profile": {"type": "string", "enum": ["driving-car", "driving-hgv", "cycling-regular", "foot-walking"]},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 10}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_session",
+            "description": "Use only the current user's owner-isolated saved browser profile. Navigate public sites, inspect page text, click safe controls, fill non-password fields, go back, wait, and close. Password fields are user-only in Settings. Never click purchase, checkout, or payment controls. Use the Settings download control for browser-file downloads.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["status", "start", "navigate", "snapshot", "click", "fill", "press", "back", "wait", "close"]},
+                    "account_id": {"type": "string"},
+                    "url": {"type": "string"},
+                    "selector": {"type": "string"},
+                    "value": {"type": "string"},
+                    "key": {"type": "string"}
+                },
+                "required": ["action", "account_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "shopping_search",
+            "description": "Discover and compare products from public search results and source pages; prices are included only when verifiable. Browsing only: never place an order or pay.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 12}
+                },
+                "required": ["query"]
+            }
+        }
+    },
 ]
 
 

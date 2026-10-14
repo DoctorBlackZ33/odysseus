@@ -3391,6 +3391,100 @@ async def action_cookbook_serve(
     return f"Launched {repo_id} (session {sid})", True
 
 
+async def action_whatsapp_sync(
+    owner: str,
+    task_name: str,
+    prompt: str = "",
+    progress_cb=None,
+    **_,
+) -> Tuple[str, bool]:
+    """Poll and incrementally index one owner's explicitly scheduled WhatsApp account."""
+    from services.connector_store import get_account
+    from services.personal_connectors import sync_whatsapp
+
+    try:
+        config = json.loads(prompt or "{}")
+        if not isinstance(config, dict):
+            raise ValueError("WhatsApp sync settings must be an object")
+        account_id = str(config.get("account_id") or "").strip()
+        if not account_id or not get_account(owner, account_id, provider="whatsapp"):
+            raise ValueError("WhatsApp account not found for this owner")
+        if progress_cb:
+            progress_cb("Polling WhatsApp history")
+        result = await sync_whatsapp(
+            owner,
+            account_id,
+            max_pages=config.get("max_pages", 20),
+            batch_size=100,
+        )
+        coverage = result.get("coverage") or "unknown"
+        state = "complete" if result.get("coverage_complete") else coverage
+        return (
+            f"WhatsApp history sync {state}: indexed {result.get('indexed', 0)} "
+            f"records, deleted {result.get('deleted', 0)}; "
+            f"{result.get('history_progress', {}).get('status', 'progress unknown')}",
+            True,
+        )
+    except Exception as exc:
+        return f"WhatsApp history sync failed: {exc}", False
+
+
+async def action_whatsapp_send_message(
+    owner: str,
+    task_name: str,
+    prompt: str = "",
+    run_id: str | None = None,
+    progress_cb=None,
+    **_,
+) -> Tuple[str, bool]:
+    """Submit the user-confirmed message once per scheduler run."""
+    import hashlib
+    from src.whatsapp_provider import validate_whatsapp_chat_id, validate_whatsapp_message_text
+    from services.connector_store import get_account
+    from services.personal_connectors import whatsapp_provider, whatsapp_write_enabled
+
+    provider = None
+    try:
+        config = json.loads(prompt or "{}")
+        if not isinstance(config, dict):
+            raise ValueError("WhatsApp send settings must be an object")
+        if config.get("scheduled_send_ack") is not True:
+            raise ValueError("Confirm that this task sends automatically on every scheduled run")
+        account_id = str(config.get("account_id") or "").strip()
+        account = get_account(owner, account_id, provider="whatsapp")
+        if not account:
+            raise ValueError("WhatsApp account not found for this owner")
+        if not whatsapp_write_enabled():
+            raise PermissionError("WhatsApp sending is disabled; enable WHATSAPP_ENABLE_WRITES explicitly")
+        if not run_id:
+            raise ValueError("Scheduler run identity is required for idempotent WhatsApp sends")
+        chat_id = validate_whatsapp_chat_id(config.get("chat_id"))
+        text = validate_whatsapp_message_text(config.get("text"))
+        provider = whatsapp_provider(owner, account_id)
+        key_material = "\0".join((str(owner), account_id, str(run_id)))
+        idempotency_key = "task-" + hashlib.sha256(key_material.encode("utf-8")).hexdigest()
+        if progress_cb:
+            progress_cb("Submitting the scheduled WhatsApp message")
+        result = await provider.send_text(chat_id, text, idempotency_key)
+        status = str(result.get("status") or "unknown").lower()
+        details = {
+            "queued": "queued; provider submission is pending",
+            "sending": "submission in progress",
+            "submitted": "submitted to WhatsApp; no delivery receipt is confirmed",
+            "delivered": "delivery receipt received",
+            "read": "read receipt received",
+            "unknown": "delivery is unknown; the same run will not submit a duplicate",
+            "failed": "provider reported a failed submission",
+        }
+        success = status in {"queued", "sending", "submitted", "delivered", "read", "unknown"}
+        return f"WhatsApp send status: {status} — {details.get(status, 'provider status unavailable')}", success
+    except Exception as exc:
+        return f"WhatsApp scheduled send failed: {exc}", False
+    finally:
+        if provider:
+            await provider.aclose()
+
+
 BUILTIN_ACTIONS = {
     "tidy_sessions": action_tidy_sessions,
     "tidy_documents": action_tidy_documents,
@@ -3412,6 +3506,8 @@ BUILTIN_ACTIONS = {
     "audit_skills": action_audit_skills,
     "check_email_urgency": action_check_email_urgency,
     "cookbook_serve": action_cookbook_serve,
+    "whatsapp_sync": action_whatsapp_sync,
+    "whatsapp_send_message": action_whatsapp_send_message,
     # ping_notes removed from the registry — runs only inside `_note_pings_loop`.
 }
 
@@ -3433,4 +3529,6 @@ BUILTIN_ACTION_INFO = {
     "test_skills": "Run the per-skill Test on every skill: agent run + LLM judge → records verdict on the skill (pass/needs_work/fail/inconclusive). Advisory only — never rewrites or demotes anything.",
     "audit_skills": "Audit unaudited skills after enough new skills are added: test, narrow metadata, self-edit/retry, optional teacher rewrite, tag duplicates/trivial skills, and publish/draft using the auto-approve threshold.",
     "check_email_urgency": "Scan unread emails hourly, tag urgent/reply-soon/newsletter/marketing/spam, and send a reminder when a new email needs a fast reply.",
+    "whatsapp_sync": "Poll and incrementally index this owner's WhatsApp history",
+    "whatsapp_send_message": "Send this exact user-confirmed WhatsApp message on each scheduled run",
 }

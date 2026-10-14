@@ -113,6 +113,11 @@ PLAN_MODE_READONLY_TOOLS = {
     # classified — see the plan-mode partition test in
     # tests/test_email_registry_sync.py.
     "search_emails",
+    "connector_search",
+    "moodle_read",
+    "whatsapp_read",
+    "maps_search",
+    "shopping_search",
     "scan_email_unsubscribes",
     "list_served_models",
     "list_downloads",
@@ -157,6 +162,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "download_attachment",
     "download_model", "serve_model",
     "stop_served_model", "cancel_download", "adopt_served_model", "serve_preset",
+    "connector_sync", "whatsapp_send", "browser_session",
     "generate_image", "edit_image", "trigger_research", "manage_research",
     # Shell is never read-only-safe; block it explicitly so it stays out of plan
     # mode even if the schema list fails to load.
@@ -281,4 +287,13 @@ def delegated_credential_blocked_tools() -> Set[str]:
     hands to a third party, so it is capped at the non-admin policy no matter
     who minted it.
     """
-    return set(NON_ADMIN_BLOCKED_TOOLS)
+    return set(NON_ADMIN_BLOCKED_TOOLS) | {
+        "connector_search",
+        "connector_sync",
+        "moodle_read",
+        "whatsapp_read",
+        "whatsapp_send",
+        "browser_session",
+        "maps_search",
+        "shopping_search",
+    }

@@ -34,6 +34,14 @@ logs/
 *.sqlite
 *.sqlite3
 
+# Private WhatsApp bridge state and local runtime files
+/whatsapp-bridge/data/
+/whatsapp-bridge/logs/
+/whatsapp-bridge/node_modules/
+/whatsapp-bridge/.env
+/whatsapp-bridge/.env.*
+/whatsapp-bridge/test-query*.js
+
 # Node
 node_modules/
 services/node_modules/

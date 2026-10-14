@@ -5748,6 +5748,7 @@ def setup_email_routes():
                 db, account_id, owner, initial_scope
             )
             row_scope = row.owner or ""
+            source_owners = {row.owner or owner, row_scope}
             was_default = bool(row.is_default)
             db.delete(row)
             # Flush the removal before staging a replacement default.  The
@@ -5773,6 +5774,13 @@ def setup_email_routes():
             # transition, so another worker can never observe or race the old
             # split-commit gap.
             db.commit()
+            try:
+                from services.connector_store import delete_account_sources
+                for source_owner in source_owners:
+                    delete_account_sources(source_owner, "gmail", account_id)
+            except Exception as exc:
+                logger.error("Gmail connector-source cleanup failed for deleted account %s: %s",
+                             account_id, type(exc).__name__)
             return {"ok": True}
         finally:
             db.close()

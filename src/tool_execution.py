@@ -753,6 +753,7 @@ async def _direct_fallback(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    tool_run_id: Optional[str] = None,
 ) -> Optional[Dict]:
     _subproc_env = {
         **os.environ,
@@ -768,6 +769,7 @@ async def _direct_fallback(
             "subproc_env": _subproc_env,
             "session_id": session_id,
             "owner": owner,
+            "tool_run_id": tool_run_id,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -933,6 +935,11 @@ async def execute_tool_block(
             session_id=session_id,
             disabled_tools=disabled_tools,
             owner=owner,
+            tool_run_id=(
+                security_context.run_id
+                if isinstance(security_context, ToolRunSecurityContext)
+                else None
+            ),
             progress_cb=progress_cb,
             tool_policy=tool_policy,
             approved_document_id=(
@@ -967,6 +974,7 @@ async def _execute_tool_block_impl(
     session_id: Optional[str] = None,
     disabled_tools: Optional[set] = None,
     owner: Optional[str] = None,
+    tool_run_id: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
     approved_document_id: Optional[str] = None,
@@ -1322,10 +1330,12 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
 
 
-    elif tool in dynamic_handlers:
         first_line = content.split(chr(10))[0][:80]
         desc = f"registry: {tool} {first_line}".strip()
-        res = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        res = await _direct_fallback(
+            tool, content, progress_cb=progress_cb,
+            session_id=session_id, owner=owner, tool_run_id=tool_run_id,
+        )
 
         if isinstance(res, tuple):
             desc, result = res

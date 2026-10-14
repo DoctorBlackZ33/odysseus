@@ -486,19 +486,16 @@ def _assert_owns_account(account_id: str, owner: str) -> None:
 
 
 def _account_visible_to_owner(row, owner: str) -> bool:
-    """Whether an authenticated `owner` may act on this EmailAccount row.
+    """Check mailbox ownership, except in the explicit single-user no-auth mode."""
+    from src.owner_identity import auth_disabled
 
-    Mirrors the SQL predicate in `_get_email_config`'s
-    `_owner_or_matching_legacy_account`: a caller sees an account they own, or a
-    legacy owner-less account (owner NULL/"") only when its own mailbox
-    (`imap_user` / `from_address`) is the caller's. `email_accounts` is the one
-    owner-scoped table deliberately left out of the legacy-owner migration
-    backfill, so ownerless rows persist on multi-user deploys — making this the
-    gate that keeps one tenant off another's imported mailbox and its decrypted
-    IMAP/SMTP credentials."""
+    if auth_disabled():
+        return True
     row_owner = getattr(row, "owner", None) or ""
     if row_owner:
         return row_owner == owner
+    if not owner:
+        return False
     return owner in {
         getattr(row, "imap_user", None) or "",
         getattr(row, "from_address", None) or "",

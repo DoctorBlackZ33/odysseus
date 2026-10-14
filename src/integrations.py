@@ -426,13 +426,11 @@ class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
     pinned, which is what closes the rebinding window.
     """
 
-    def __init__(self, ips: List[ipaddress._BaseAddress]):
+    def __init__(self, ips: List[ipaddress._BaseAddress], *,
+                 max_response_bytes: Optional[int] = None):
         self._pinned_ips = list(ips)
+        self._max_response_bytes = max_response_bytes
         self._pool = httpcore.AsyncConnectionPool(
-            # Reuse the CA trust the default httpx client would build (certifi
-            # plus SSL_CERT_FILE / SSL_CERT_DIR when trust_env is set) so
-            # swapping in this transport doesn't quietly change which chains
-            # verify. ssl.create_default_context() would use system roots.
             ssl_context=httpx.create_ssl_context(),
             http1=True,
             http2=False,
@@ -440,6 +438,10 @@ class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self._max_response_bytes is not None:
+            # Match outbound_fetch's bounded-body policy: never let httpx's
+            # eager content decoding expand a capped encoded body unboundedly.
+            request.headers["Accept-Encoding"] = "identity"
         core_req = httpcore.Request(
             method=request.method,
             url=httpcore.URL(
@@ -454,8 +456,25 @@ class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
         )
         try:
             core_resp = await self._pool.handle_async_request(core_req)
-            content = b"".join([chunk async for chunk in core_resp.aiter_stream()])
-            await core_resp.aclose()
+            try:
+                encoding = httpx.Headers(core_resp.headers).get("content-encoding", "").strip().lower()
+                if self._max_response_bytes is not None and encoding not in {"", "identity"}:
+                    raise httpx.RequestError(
+                        "Refusing compressed response after requesting identity; "
+                        "cannot bound decoded body size",
+                        request=request,
+                    )
+                data = bytearray()
+                async for chunk in core_resp.aiter_stream():
+                    if (self._max_response_bytes is not None
+                            and len(data) + len(chunk) > self._max_response_bytes):
+                        raise httpx.RequestError(
+                            f"Response exceeded the {self._max_response_bytes}-byte limit",
+                            request=request,
+                        )
+                    data.extend(chunk)
+            finally:
+                await core_resp.aclose()
         except Exception as exc:
             mapped = _HTTPCORE_TO_HTTPX_EXC.get(type(exc))
             if mapped is not None:
@@ -464,7 +483,7 @@ class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
         return httpx.Response(
             status_code=core_resp.status,
             headers=core_resp.headers,
-            content=content,
+            content=bytes(data),
             extensions=core_resp.extensions,
         )
 

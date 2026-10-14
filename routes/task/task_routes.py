@@ -260,6 +260,69 @@ def _run_research_id(task: ScheduledTask) -> str:
     return ""
 
 
+def _validate_whatsapp_task_action(
+    owner: str | None,
+    task_type: str | None,
+    action: str | None,
+    trigger_type: str | None,
+    prompt: str | None,
+) -> str | None:
+    if action not in {"whatsapp_sync", "whatsapp_send_message"}:
+        return None
+    import os
+    from services.connector_store import get_account
+    if task_type != "action" or trigger_type != "schedule":
+        raise HTTPException(400, "WhatsApp connector actions must be scheduled built-in actions")
+    if not owner:
+        raise HTTPException(403, "WhatsApp scheduled actions require an authenticated owner")
+    if not prompt or len(prompt) > 7000:
+        raise HTTPException(400, "WhatsApp action settings are missing or too large")
+    try:
+        config = json.loads(prompt)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "WhatsApp action settings must be valid JSON") from exc
+    if not isinstance(config, dict):
+        raise HTTPException(400, "WhatsApp action settings must be a JSON object")
+    account_id = str(config.get("account_id") or "").strip()
+    account = get_account(owner, account_id, provider="whatsapp")
+    if not account:
+        raise HTTPException(404, "WhatsApp account not found for this owner")
+    bridge_id = os.environ.get("WHATSAPP_ACCOUNT_ID", "").strip()
+    token = os.environ.get("WHATSAPP_API_TOKEN", "").strip()
+    bound_id = str((account.get("config") or {}).get("bridge_account_id") or "")
+    if len(token) < 32 or not bridge_id or bound_id != bridge_id:
+        raise HTTPException(503, "WhatsApp bridge account/token configuration is missing or does not match this owner's account")
+    if action == "whatsapp_send_message":
+        if os.environ.get("WHATSAPP_ENABLE_WRITES", "").strip().lower() not in {"1", "true", "yes"}:
+            raise HTTPException(503, "WhatsApp sending is disabled; enable WHATSAPP_ENABLE_WRITES in both app and bridge environments")
+        if config.get("scheduled_send_ack") is not True:
+            raise HTTPException(400, "Explicitly confirm that this scheduled task sends automatically on every run")
+        from src.whatsapp_provider import validate_whatsapp_chat_id, validate_whatsapp_message_text
+        try:
+            chat_id = validate_whatsapp_chat_id(config.get("chat_id"))
+            text = validate_whatsapp_message_text(config.get("text"))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        config = {
+            "account_id": account_id,
+            "chat_id": chat_id,
+            "text": text,
+            "scheduled_send_ack": True,
+        }
+    else:
+        raw_pages = config.get("max_pages", 20)
+        if isinstance(raw_pages, bool):
+            raise HTTPException(400, "WhatsApp sync max_pages must be an integer between 1 and 200")
+        try:
+            max_pages = int(raw_pages)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "WhatsApp sync max_pages must be an integer between 1 and 200") from exc
+        if not 1 <= max_pages <= 200:
+            raise HTTPException(400, "WhatsApp sync max_pages must be between 1 and 200")
+        config = {"account_id": account_id, "max_pages": max_pages}
+    return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+
+
 def _resolve_run_endpoint(db, task: ScheduledTask, run: TaskRun) -> str:
     """Best-effort endpoint URL for reopening a task run in chat."""
     if getattr(task, "endpoint_url", None):
@@ -461,6 +524,9 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         # uses subprocess.run(shell=True) and ssh_command / run_script run
         # arbitrary commands.
         _require_admin_for_task_action(user, req.task_type, req.action)
+        task_prompt = _validate_whatsapp_task_action(
+            user, req.task_type, req.action, req.trigger_type, req.prompt
+        ) or req.prompt
         if req.trigger_type == "schedule" and not req.schedule:
             raise HTTPException(400, "Schedule is required for schedule-triggered tasks")
         if req.trigger_type == "schedule" and req.schedule == "cron" and not req.cron_expression:
@@ -529,7 +595,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
                 id=task_id,
                 owner=user,
                 name=name,
-                prompt=req.prompt,
+                prompt=task_prompt,
                 task_type=req.task_type,
                 action=req.action,
                 schedule=req.schedule,
@@ -677,11 +743,18 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             next_task_type = req.task_type if req.task_type is not None else task.task_type
             next_action = req.action if req.action is not None else task.action
             _require_admin_for_task_action(user, next_task_type, next_action)
+            next_trigger_type = req.trigger_type if req.trigger_type is not None else (task.trigger_type or "schedule")
+            next_prompt = req.prompt if req.prompt is not None else task.prompt
+            validated_whatsapp_prompt = _validate_whatsapp_task_action(
+                user, next_task_type, next_action, next_trigger_type, next_prompt
+            )
+            if validated_whatsapp_prompt is not None:
+                next_prompt = validated_whatsapp_prompt
 
             if req.name is not None:
                 task.name = req.name
-            if req.prompt is not None:
-                task.prompt = req.prompt
+            if req.prompt is not None or next_action in {"whatsapp_sync", "whatsapp_send_message"}:
+                task.prompt = next_prompt
             if req.task_type is not None:
                 task.task_type = req.task_type
             if req.action is not None:

@@ -379,6 +379,32 @@ def test_browser_mcp_result_taints_and_only_static_reads_remain_available():
     assert context.decision_for("python").allowed is False
 
 
+def test_browser_navigation_and_back_keep_the_network_egress_gate():
+    context = ToolRunSecurityContext()
+    context.observe_tool_result(
+        "browser_session",
+        {"status": "active", "url": "https://example.invalid"},
+        '{"action":"snapshot"}',
+    )
+
+    navigate = capabilities_for_action(
+        "browser_session", '{"action":"navigate","url":"https://example.invalid"}',
+    )
+    assert ToolEffect.NETWORK_EGRESS in navigate.effects
+    assert context.decision_for(
+        "browser_session", '{"action":"navigate","url":"https://example.invalid"}',
+    ).allowed is False
+    assert context.decision_for(
+        "browser_session", '{"action":"back"}',
+    ).allowed is False
+    # A browser profile can contain private signed-in content. Reading it also
+    # needs separate authorization after external content has influenced the run.
+    for action in ("snapshot", "status"):
+        decision = context.decision_for("browser_session", json.dumps({"action": action}))
+        assert decision.allowed is False
+        assert "read_private" in decision.reason
+
+
 def test_prefetched_external_message_initializes_taint():
     messages = [
         {
@@ -1471,3 +1497,25 @@ def test_authorized_document_stream_precedes_completed_update(monkeypatch):
     assert event_types.index("doc_stream_open") < event_types.index("doc_update")
     assert event_types.index("doc_stream_delta") < event_types.index("doc_update")
     assert event_types.index("doc_update") < event_types.index("tool_output")
+
+
+@pytest.mark.parametrize("tool_name", ["moodle_read", "whatsapp_read"])
+def test_owner_connector_reads_are_brokered_private_and_plan_mode_readonly(tool_name):
+    from src.tool_security import PLAN_MODE_READONLY_TOOLS, plan_mode_disabled_tools
+
+    capabilities = capabilities_for_tool(tool_name)
+    assert ToolEffect.READ_PRIVATE in capabilities.effects
+    assert ToolEffect.BROKERED_NETWORK_READ in capabilities.effects
+    assert capabilities.result_integrity is ResultIntegrity.EXTERNAL_UNTRUSTED
+    assert tool_name in PLAN_MODE_READONLY_TOOLS
+    assert tool_name not in plan_mode_disabled_tools()
+
+    context = ToolRunSecurityContext()
+    context.observe_tool_result(
+        "web_search", {"results": [{"title": "Synthetic external result"}]},
+        '{"query":"synthetic"}',
+    )
+    assert context.external_untrusted_context_seen is True
+    decision = context.decision_for(tool_name, '{"action":"status","account_id":"owned"}')
+    assert decision.allowed is False
+    assert "read_private" in decision.reason

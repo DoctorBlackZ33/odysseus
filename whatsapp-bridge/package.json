@@ -1,0 +1,30 @@
+{
+  "name": "whatsapp-bridge",
+  "version": "1.0.0",
+  "description": "WhatsApp bridge for odysseus using Baileys",
+  "main": "index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "allowScripts": {
+    "baileys": true,
+    "better-sqlite3": true,
+    "protobufjs": true,
+    "sharp": true
+  },
+  "scripts": {
+    "start": "node index.js",
+    "start:debug": "node index.js --debug",
+    "test": "node --test bridge.test.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "baileys": "7.0.0-rc14",
+    "better-sqlite3": "13.0.3",
+    "express": "5.2.1",
+    "pino": "10.3.1"
+  }
+}

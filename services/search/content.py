@@ -81,6 +81,21 @@ def _extract_meta(soup: BeautifulSoup) -> dict:
         keywords = kw_tag["content"].strip()
     return {"description": description, "keywords": keywords}
 
+def _extract_jsonld(soup: BeautifulSoup) -> list:
+    """Return a bounded set of JSON-LD objects for structured consumers."""
+    items = []
+    for script in soup.select('script[type="application/ld+json"]')[:20]:
+        raw = (script.string or script.get_text() or "").strip()
+        if not raw or len(raw) > 100_000:
+            continue
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        items.extend(value if isinstance(value, list) else [value])
+    return items[:100]
+
+
 
 def _extract_og_image(soup: BeautifulSoup) -> str:
     """Extract the best representative image URL from meta tags.
@@ -379,6 +394,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
         "meta_description": meta_info.get("description", ""),
         "meta_keywords": meta_info.get("keywords", ""),
         "og_image": og_image,
+        "structured_data": _extract_jsonld(soup),
         "js_rendered": js_rendered,
         "js_message": js_message,
         "success": True,

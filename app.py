@@ -863,6 +863,10 @@ from routes.email_routes import setup_email_routes
 email_router = setup_email_routes()
 app.include_router(email_router)
 
+# Owner-scoped Gmail/Moodle/WhatsApp retrieval, maps, and shopping APIs.
+from routes.connector_routes import setup_connector_routes
+app.include_router(setup_connector_routes())
+
 # Codex integration — HTTP surface for the Codex plugin/MCP bridge. Reuses
 # api_token scopes (todos:read|write, email:read|draft|send) so external
 # Codex sessions can only touch the data the user explicitly allowed. Mounted
@@ -1057,6 +1061,22 @@ async def _startup_event():
     app.state._startup_tasks = _startup_tasks
     if upload_cleanup_func:
         upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
+    async def _personal_connector_sync_loop():
+        while True:
+            try:
+                await asyncio.sleep(60)
+                from services.personal_connectors import sync_due_auto_sync
+                await sync_due_auto_sync()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Personal connector auto-sync failed: %s", type(exc).__name__)
+
+    personal_sync_task = asyncio.create_task(
+        _personal_connector_sync_loop(), name="personal-connector-auto-sync"
+    )
+    app.state.personal_connector_sync_task = personal_sync_task
+    _startup_tasks.append(personal_sync_task)
     # Always-on monitor that auto-continues the agent when a background bash
     # job (#!bg) finishes — re-invokes the turn with the job output.
     try:
@@ -1279,6 +1299,18 @@ async def _shutdown_event():
             await upload_cleanup_task
         except asyncio.CancelledError:
             pass
+    personal_sync_task = getattr(app.state, "personal_connector_sync_task", None)
+    if personal_sync_task:
+        personal_sync_task.cancel()
+        try:
+            await personal_sync_task
+        except asyncio.CancelledError:
+            pass
+    try:
+        from services.moodle_browser import shutdown_browser
+        await shutdown_browser()
+    except Exception as exc:
+        logger.debug("Moodle browser shutdown skipped: %s", type(exc).__name__)
     # Stop task scheduler (no-op if it never started under the gate)
     try:
         await task_scheduler.stop()
