@@ -398,7 +398,7 @@ def _gmail_cursor_account(owner: str, email_account_id: str, name: str) -> dict:
 
 def _sync_email_sync(owner: str, account_id: str, message_budget: int) -> dict:
     """Owner-filtered IMAP scan; cursor is UIDVALIDITY+UID per mailbox folder."""
-    from routes import email_helpers
+    from routes.email import email_helpers
     db = SessionLocal()
     try:
         account = db.query(EmailAccount).filter(
@@ -616,7 +616,7 @@ async def sync_email(owner: str, account_id: str, *, message_budget: int = 500) 
     except Exception as exc:
         db = SessionLocal()
         try:
-            from routes import email_helpers
+            from routes.email import email_helpers
             account = db.query(EmailAccount).filter(
                 EmailAccount.id == account_id, EmailAccount.enabled.is_(True)
             ).first()

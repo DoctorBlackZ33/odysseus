@@ -59,3 +59,7 @@ timetree*.png
 *_signin_page.png
 *_calendar_view.png
 .gitignore
+
+# Include distribution notices despite the general documentation exclusion.
+!ACKNOWLEDGMENTS.md
+!services/hwfit/data/README.md

@@ -34,7 +34,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
+Open `http://localhost:7011` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
 
 The compose files pull the official multi-arch image `ghcr.io/odysseus-dev/odysseus` (published by CI on every push to `main` and `dev`) and only build locally if the pull fails — so this also works on hosts without a build toolchain, e.g. as a [Portainer](https://www.portainer.io/) stack.
 
@@ -75,6 +75,8 @@ Native installs need the complete `requirements.txt` environment, followed by `p
 
 Keyword retrieval and citations work without a vector service. Semantic indexing is an explicit per-source option requiring a healthy ChromaDB/embedding setup; deleting a source or replacing its content with empty text removes its previous indexed content. Actual Google OAuth, ETH Shibboleth/MFA and WhatsApp pairing must be completed by the account owner; synthetic protocol/browser checks are not proof of those live account authorizations.
 Moodle calendar dates are normalized to UTC for date-filtered retrieval and removal of disappeared events; the next sync also repairs older epoch-string dates. Bounded file/REST fetches request uncompressed responses and reject servers that still return compressed content before decoding it, matching the shared web-fetch safety policy.
+Connector tools participate in the request-scoped tool authority and untrusted-content approval gates. Read-only WhatsApp requests do not authorize sends, even before any external content is read; immediate and scheduled sends require affirmative send intent. Scheduled WhatsApp actions validate the same account/confirmation controls from both Settings and agent task creation; their sealed payload cannot be changed after admission. This release freezes the official `dev` update at `c3819e3cbf56c4f899eacc66b21115a77d9c570d`.
+The frozen tree's canonical Settings → Integrations flow was exercised with isolated synthetic Alice/Bob accounts: account creation, browser navigation/read/click/back/download, HTTPS field fill and rejection clearing, Moodle courses/calendar/files, IMAP-backed Gmail sync, Maps routing, Shopping JSON-LD and guarded browser handoff, and authenticated WhatsApp history/live reads. Scheduler sync and persisted-occurrence recovery were exercised with provider writes disabled; no live messages or purchases were made. Non-admin users can manage only their own connectors. These checks do not replace live authorization or a healthy semantic-index service.
 
 
 ## Demo

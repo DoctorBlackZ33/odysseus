@@ -254,7 +254,7 @@ async def email_accounts(owner: str = Depends(require_user)):
         rows = db.query(EmailAccount).filter(
             EmailAccount.enabled.is_(True)
         ).order_by(EmailAccount.created_at.asc()).all()
-        from routes.email_helpers import _account_visible_to_owner
+        from routes.email.email_helpers import _account_visible_to_owner
         rows = [row for row in rows if _account_visible_to_owner(row, owner)]
         indices = list_accounts(owner, provider="gmail")
         by_email_id = {}
@@ -292,7 +292,7 @@ async def update_gmail_index(email_account_id: str, req: GmailIndexUpdate,
             EmailAccount.id == email_account_id,
             EmailAccount.enabled.is_(True),
         ).first()
-        from routes.email_helpers import _account_visible_to_owner
+        from routes.email.email_helpers import _account_visible_to_owner
         if email_account is None or not _account_visible_to_owner(email_account, owner):
             raise HTTPException(404, "Enabled email account not found")
         name = str(email_account.name or email_account.imap_user or email_account_id)

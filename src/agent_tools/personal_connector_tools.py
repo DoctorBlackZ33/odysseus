@@ -74,7 +74,7 @@ async def connector_sync(content: str, ctx: dict) -> dict:
         if not account_id:
             raise ValueError("account_id is required")
         if provider == "gmail":
-            from routes.email_helpers import _account_visible_to_owner
+            from routes.email.email_helpers import _account_visible_to_owner
             db = SessionLocal()
             try:
                 account = db.query(EmailAccount).filter(

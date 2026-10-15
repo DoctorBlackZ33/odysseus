@@ -350,7 +350,8 @@ def test_gmail_attachment_extraction_returns_bounded_text():
 def test_auth_disabled_gmail_sync_keeps_unscanned_legacy_rows_visible(monkeypatch):
     _stub_multipart_if_missing(monkeypatch)
     import core.database as database
-    from routes import connector_routes, email_helpers
+    from routes import connector_routes
+    from routes.email import email_helpers
     from services import connector_store, personal_connectors
     from src.owner_identity import DEFAULT_LOCAL_OWNER
     from tests.helpers.sqlite_db import make_temp_sqlite
@@ -717,7 +718,7 @@ def test_maps_rate_limit_is_reported_without_retry():
 
 def test_gmail_sync_deduplicates_folder_copies_and_persists_all_live_refs(monkeypatch):
     import core.database as database
-    from routes import email_helpers
+    from routes.email import email_helpers
     from services import connector_store, personal_connectors
     from tests.helpers.sqlite_db import make_temp_sqlite
     from email.message import EmailMessage
@@ -929,7 +930,7 @@ def test_gmail_empty_folder_list_retains_index_and_saved_cursors(
         def logout(self):
             return "OK", []
 
-    from routes import email_helpers
+    from routes.email import email_helpers
     monkeypatch.setattr(email_helpers, "_imap_connect", lambda **_kwargs: EmptyListMailbox())
     result = personal_connectors._sync_email_sync("", "synthetic-empty-list-mail", 50)
 
@@ -1454,7 +1455,7 @@ def test_gmail_partial_fetch_does_not_advance_cursor_past_missing_uid(
 ):
     _disable_vectors(monkeypatch)
     import core.database as database
-    from routes import email_helpers
+    from routes.email import email_helpers
     from services import personal_connectors
 
     store = connector_store_db
@@ -1744,3 +1745,234 @@ def test_capped_browser_and_rest_transport_reject_compression_before_decoding(
         server.shutdown()
         server.server_close()
         worker.join(timeout=5)
+
+
+@pytest.mark.parametrize("text,tool", [
+    ("Read my Moodle course contents", "moodle_read"),
+    ("Search my WhatsApp history", "whatsapp_read"),
+    ("Get directions on maps to Zurich", "maps_search"),
+    ("Compare shopping product offers", "shopping_search"),
+    ("Open my browser session", "browser_session"),
+    ("Search indexed sources for quasar", "connector_search"),
+])
+def test_connector_requests_enter_canonical_authority_without_shell_grants(text, tool):
+    from src.agent_runtime.authority import ExactOperation, create_request_authority
+    grant = create_request_authority(text, owner="alice", session_id="synthetic")
+    assert grant.permits(ExactOperation.normalize(tool, '{"action":"status"}'))
+    assert not grant.permits(ExactOperation.normalize("bash", "id"))
+    assert not grant.permits(ExactOperation.normalize("whatsapp_send", "{}"))
+
+
+def test_real_connector_dispatch_preserves_owner_citations_and_external_gate(
+    connector_store_db, monkeypatch,
+):
+    from src.agent_runtime.authority import create_request_authority
+    from src.tool_types import ToolBlock
+    from src.tool_capabilities import ToolRunSecurityContext
+    from src.tool_execution import execute_tool_block
+    import src.tool_capabilities as capabilities
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setattr(capabilities, "TOOL_APPROVAL_GATE_ENABLED", True)
+    _disable_vectors(monkeypatch)
+    alice = connector_store_db.upsert_source_record(
+        "alice", provider="moodle", account_id="a", source_type="course",
+        external_id="1", title="Synthetic course", content="quasar-owner-alice",
+        source_url="https://example.invalid/course/1")
+    connector_store_db.upsert_source_record(
+        "bob", provider="moodle", account_id="b", source_type="course",
+        external_id="2", title="Other course", content="quasar-owner-bob")
+    grant = create_request_authority(
+        "Search indexed sources for quasar", owner="alice", session_id="synthetic")
+    context = ToolRunSecurityContext()
+    _, result = asyncio.run(execute_tool_block(
+        ToolBlock("connector_search", '{"query":"quasar"}'),
+        owner="alice", session_id="synthetic", security_context=context,
+        request_authority=grant))
+    assert result["exit_code"] == 0
+    assert [row["id"] for row in result["results"]] == [alice["id"]]
+    assert result["results"][0]["citation"] == "https://example.invalid/course/1"
+    assert context.external_untrusted_context_seen
+    assert not context.decision_for("browser_session", '{"action":"navigate"}').allowed
+    _, denied = asyncio.run(execute_tool_block(
+        ToolBlock("connector_search", '{"query":"quasar"}'),
+        owner="bob", session_id="synthetic", security_context=context,
+        request_authority=grant))
+    assert denied["failure_kind"] == "request_authority_denied"
+
+
+def test_task_tool_seals_validated_whatsapp_schedule_and_rejects_unconfirmed_edit(
+    connector_store_db, monkeypatch,
+):
+    import core.database as database
+    from src.agent_runtime.authority import (
+        bind_request_authority, create_request_authority, restore_task_authority,
+        task_operation,
+    )
+    from src.tools.system import do_manage_tasks
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("WHATSAPP_ACCOUNT_ID", "synthetic-bridge")
+    monkeypatch.setenv("WHATSAPP_API_TOKEN", "synthetic-token-0123456789abcdef0123456789")
+    monkeypatch.setenv("WHATSAPP_ENABLE_WRITES", "true")
+    monkeypatch.setattr(database, "SessionLocal", connector_store_db.SessionLocal)
+    account = connector_store_db.create_account(
+        "alice", "whatsapp", "Synthetic",
+        config={"bridge_account_id": "synthetic-bridge"})
+    payload = {
+        "account_id": account["id"], "chat_id": "15555550123",
+        "text": "Synthetic reminder", "scheduled_send_ack": True,
+    }
+    args = {"action": "create", "name": "Synthetic scheduled send", "task_type": "action",
+            "action_name": "whatsapp_send_message", "schedule": "daily",
+            "scheduled_time": "09:00", "prompt": json.dumps(payload)}
+    parent = create_request_authority(
+        "Schedule a daily WhatsApp message to send my reminder", owner="alice")
+    with bind_request_authority(parent):
+        created = asyncio.run(do_manage_tasks(json.dumps(args), owner="alice"))
+    assert created["exit_code"] == 0, created
+    with connector_store_db.SessionLocal() as db:
+        task = db.get(database.ScheduledTask, created["task_id"])
+        restored = restore_task_authority(
+            task.request_authority_json, task.prompt, task.task_type, task.action, owner="alice")
+        assert restored.permits(task_operation(task.task_type, task.action, task.prompt))
+        assert not restored.permits(task_operation(task.task_type, task.action, task.prompt + " "))
+        original_prompt = task.prompt
+    payload["scheduled_send_ack"] = False
+    edited = asyncio.run(do_manage_tasks(json.dumps({
+        "action": "edit", "task_id": created["task_id"], "prompt": json.dumps(payload),
+    }), owner="alice"))
+    assert edited["exit_code"] == 1
+    with connector_store_db.SessionLocal() as db:
+        assert db.get(database.ScheduledTask, created["task_id"]).prompt == original_prompt
+
+
+def test_gmail_sync_tool_uses_owner_scoped_canonical_email_account(
+    connector_store_db, monkeypatch,
+):
+    import core.database as database
+    from routes.email import email_helpers
+    from services import personal_connectors
+    from src.agent_tools import personal_connector_tools
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setattr(database, "SessionLocal", connector_store_db.SessionLocal)
+    monkeypatch.setattr(personal_connectors, "SessionLocal", connector_store_db.SessionLocal)
+    _disable_vectors(monkeypatch)
+    with connector_store_db.SessionLocal() as db:
+        db.add(database.EmailAccount(
+            id="tool-mail", owner="alice", name="Synthetic mailbox", enabled=True,
+        ))
+        db.commit()
+
+    class Mailbox:
+        def list(self):
+            return "OK", [b'(\\HasNoChildren) "/" "INBOX"']
+
+        def select(self, *_args, **_kwargs):
+            return "OK", [b"1"]
+
+        def response(self, name):
+            return name, [b"17"]
+
+        def uid(self, command, *_args):
+            if command == "SEARCH":
+                return "OK", [b"1"]
+            return "OK", [(b"1 (UID 1 RFC822)", b"Subject: synthetic\r\n\r\nquasar tool mail")]
+
+        def logout(self):
+            return "OK", []
+
+    connected = []
+
+    def connect(*, account_id, owner):
+        connected.append((account_id, owner))
+        return Mailbox()
+
+    monkeypatch.setattr(email_helpers, "_imap_connect", connect)
+    args = json.dumps({"provider": "gmail", "account_id": "tool-mail"})
+    result = asyncio.run(personal_connector_tools.connector_sync(args, {"owner": "alice"}))
+    assert result["exit_code"] == 0
+    assert result["result"]["indexed"] == 1
+    assert connector_store_db.search_source_records("alice", "quasar")[0]["citation"]
+    denied = asyncio.run(personal_connector_tools.connector_sync(args, {"owner": "bob"}))
+    assert denied["exit_code"] == 1
+    assert connected == [("tool-mail", "alice")]
+
+
+@pytest.mark.parametrize("text", [
+    "Search my WhatsApp history for quasar",
+    "Read my WhatsApp messages; do not send anything",
+    "Search WhatsApp history without sending messages",
+    "Search WhatsApp history and don't send a message",
+    "Search WhatsApp history, read-only",
+    'Search WhatsApp history for \"send a WhatsApp message\"',
+    "Read my WhatsApp message: “and send Bob hello”",
+    "Read my WhatsApp message: ‘and send Bob hello’",
+    "Search WhatsApp history for «and send Bob hello»",
+    "Read my WhatsApp message: and send Bob hello",
+    "Search WhatsApp history for `and send Bob hello`",
+    "Explain how to send a WhatsApp message",
+    "Use whatsapp_read to search WhatsApp history; never use whatsapp_send",
+    "Do not send a WhatsApp message",
+    "Schedule daily WhatsApp history sync, no outbound messages",
+    "Schedule daily WhatsApp message searches",
+    "Translate to French: Send a WhatsApp message",
+])
+def test_whatsapp_read_request_cannot_dispatch_first_call_send(monkeypatch, text):
+    from unittest.mock import AsyncMock
+    from src import tool_execution as execution
+    from src.agent_runtime.authority import ExactOperation, create_request_authority, task_operation
+    from src.tool_capabilities import ToolRunSecurityContext
+    from src.tool_types import ToolBlock
+
+    implementation = AsyncMock(return_value=("whatsapp_send", {"exit_code": 0}))
+    monkeypatch.setattr(execution, "_execute_tool_block_impl", implementation)
+    monkeypatch.setenv("WHATSAPP_ENABLE_WRITES", "true")
+    grant = create_request_authority(
+        text, owner="alice", session_id="synthetic",
+        capabilities={"whatsapp"},
+        history=[{"role": "user", "content": "Send a WhatsApp message to Alice"}],
+    )
+    payload = json.dumps({"account_id": "synthetic", "chat_id": "15555550123",
+                          "text": "Synthetic must never dispatch", "scheduled_send_ack": True})
+    assert not grant.permits(ExactOperation.normalize("whatsapp_send", payload))
+    assert not grant.permits(task_operation("action", "whatsapp_send_message", payload))
+    _, result = asyncio.run(execution.execute_tool_block(
+        ToolBlock("whatsapp_send", payload), owner="alice", session_id="synthetic",
+        security_context=ToolRunSecurityContext(), request_authority=grant,
+    ))
+    assert result["failure_kind"] == "request_authority_denied"
+    implementation.assert_not_awaited()
+
+
+@pytest.mark.parametrize("text", [
+    "Send a WhatsApp message to Alice",
+    "Please send Alice a message on WhatsApp",
+    "Can you message Alice on WhatsApp?",
+    "Search WhatsApp history and then send Alice the summary on WhatsApp",
+    "Use whatsapp_send to send Alice the summary",
+    'Send Alice \"Do not send anything else\" on WhatsApp',
+    'Send Alice "See you tomorrow at 09:00" on WhatsApp',
+    "Send a WhatsApp message to Alice: meet tomorrow at 09:00",
+])
+def test_explicit_whatsapp_send_request_grants_send(text):
+    from src.agent_runtime.authority import ExactOperation, create_request_authority
+
+    grant = create_request_authority(text, owner="alice")
+    assert grant.permits(ExactOperation.normalize("whatsapp_send", "{}"))
+
+
+@pytest.mark.parametrize("text", [
+    "Schedule a daily WhatsApp message to send my reminder",
+    "Schedule a daily WhatsApp message to Alice",
+    "Every day send Alice a WhatsApp message",
+    "Send a WhatsApp message to Alice tomorrow at 09:00 saying hello",
+    "Please send Alice a WhatsApp message next Monday",
+    "Send Alice a WhatsApp message in 2 hours",
+    "Send Alice a WhatsApp message on 2099-01-01 at 09:00",
+])
+def test_explicit_whatsapp_send_schedule_grants_only_delegated_send(text):
+    from src.agent_runtime.authority import ExactOperation, create_request_authority, task_operation
+
+    grant = create_request_authority(text, owner="alice")
+    assert grant.permits(task_operation("action", "whatsapp_send_message", "{}"))
+    assert not grant.permits(ExactOperation.normalize("whatsapp_send", "{}"))
