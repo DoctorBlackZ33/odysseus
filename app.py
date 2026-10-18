@@ -1196,6 +1196,9 @@ async def _startup_event():
     )
     app.state.personal_connector_sync_task = personal_sync_task
     _startup_tasks.append(personal_sync_task)
+    from services.whatsapp_runtime import runtime as whatsapp_runtime
+    app.state.whatsapp_restore_task = asyncio.create_task(whatsapp_runtime.restore(), name="restore-managed-whatsapp")
+    _startup_tasks.append(app.state.whatsapp_restore_task)
     # Always-on monitor that auto-continues the agent when a background bash
     # job (#!bg) finishes — re-invokes the turn with the job output.
     try:
@@ -1439,6 +1442,15 @@ async def _shutdown_event():
             await personal_sync_task
         except asyncio.CancelledError:
             pass
+    restore_task = getattr(app.state, "whatsapp_restore_task", None)
+    if restore_task:
+        restore_task.cancel()
+        try:
+            await restore_task
+        except asyncio.CancelledError:
+            pass
+    from services.whatsapp_runtime import runtime as whatsapp_runtime
+    await whatsapp_runtime.shutdown()
     try:
         from services.moodle_browser import shutdown_browser
         await shutdown_browser()

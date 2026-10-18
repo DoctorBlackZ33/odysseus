@@ -812,6 +812,7 @@ class CrewMember(TimestampMixin, Base):
     endpoint_url  = Column(String, nullable=True)
     greeting      = Column(Text, nullable=True)
     enabled_tools = Column(Text, nullable=True)             # JSON array or "all"
+    connector_account_ids = Column(Text, nullable=True)     # NULL inherit, [] deny, JSON IDs allow
     session_id    = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True)
     is_active     = Column(Boolean, default=True)
     sort_order    = Column(Integer, default=0)
@@ -2127,6 +2128,9 @@ def _migrate_add_assistant_columns():
                 conn.execute(text("ALTER TABLE crew_members ADD COLUMN timezone TEXT"))
                 conn.commit()
                 logging.getLogger(__name__).info("Added timezone column to crew_members")
+            if "connector_account_ids" not in cols:
+                conn.execute(text("ALTER TABLE crew_members ADD COLUMN connector_account_ids TEXT"))
+                conn.commit()
     except Exception as e:
         logging.getLogger(__name__).warning(f"assistant columns migration: {e}")
 

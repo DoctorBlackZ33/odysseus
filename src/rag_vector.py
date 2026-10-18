@@ -375,6 +375,9 @@ class VectorRAG:
                     distance = results["distances"][0][idx]
                     doc_text = results["documents"][0][idx]
                     meta = results["metadatas"][0][idx]
+                    from services.connector_grants import metadata_allowed
+                    if not metadata_allowed(meta, owner):
+                        continue
 
                     vector_sim = 1.0 - distance
                     doc_words = set(doc_text.lower().split())
@@ -417,6 +420,9 @@ class VectorRAG:
                     continue
                 for i, doc in enumerate(all_docs["documents"]):
                     meta = all_docs["metadatas"][i]
+                    from services.connector_grants import metadata_allowed
+                    if not metadata_allowed(meta, owner):
+                        continue
                     if owner and meta.get("owner") != owner:
                         continue
                     doc_lower = doc.lower()

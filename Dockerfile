@@ -9,6 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY docker/build-realesrgan-wheels.sh /usr/local/bin/build-realesrgan-wheels.sh
 RUN bash /usr/local/bin/build-realesrgan-wheels.sh /wheels
 
+FROM node:22.22.0-bookworm-slim AS bridge-runtime
+WORKDIR /bridge
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ git \
+    && rm -rf /var/lib/apt/lists/*
+COPY whatsapp-bridge/package.json whatsapp-bridge/package-lock.json ./
+RUN npm ci --omit=dev
+
 FROM python:3.14-slim
 
 # System deps. tmux is required by Cookbook for background downloads/serves.
@@ -29,8 +36,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     curl \
     git \
-    nodejs \
-    npm \
     chromium \
     fontconfig \
     fonts-noto-cjk \
@@ -47,6 +52,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb1 \
     libmagic1 \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=bridge-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=bridge-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
 
 # Private browser automation wrapper used by the native `private_browser` tool.
 # Chromium is installed above, so agent-browser can drive the existing browser
@@ -114,6 +124,7 @@ RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
 
 # Copy app code
 COPY . .
+COPY --from=bridge-runtime /bridge/node_modules/ /app/whatsapp-bridge/node_modules/
 # Require the redistribution notices in the image build context.
 COPY licenses/ ./licenses/
 COPY THIRD_PARTY_PROVENANCE.json ACKNOWLEDGMENTS.md ./

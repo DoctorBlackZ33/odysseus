@@ -3603,8 +3603,8 @@ async def action_whatsapp_send_message(
         account = get_account(owner, account_id, provider="whatsapp")
         if not account:
             raise ValueError("WhatsApp account not found for this owner")
-        if not whatsapp_write_enabled():
-            raise PermissionError("WhatsApp sending is disabled; enable WHATSAPP_ENABLE_WRITES explicitly")
+        if not whatsapp_write_enabled(owner, account_id):
+            raise PermissionError("WhatsApp sending is disabled; enable it separately for this account in Integrations")
         if not run_id:
             raise ValueError("Scheduler run identity is required for idempotent WhatsApp sends")
         chat_id = validate_whatsapp_chat_id(config.get("chat_id"))

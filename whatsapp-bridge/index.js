@@ -18,6 +18,7 @@ const port = Number(process.env.WHATSAPP_PORT || 9100)
 const bindAddress = process.env.WHATSAPP_BIND || '127.0.0.1'
 const connectEnabled = process.env.WHATSAPP_CONNECT === 'true'
 const writesEnabled = process.env.WHATSAPP_ENABLE_WRITES === 'true'
+const authSubdirectory = process.env.WHATSAPP_AUTH_SUBDIR === 'auth'
 const logger = pino({ level: process.argv.includes('--debug') ? 'debug' : 'info',
   redact: ['qr', 'token', 'authorization', 'password', 'creds', 'auth', 'mediaKey', 'session'] })
 const baileysLogger = pino({ level: 'warn',
@@ -32,6 +33,7 @@ let qrExpiresAt = null
 let reconnectTimer = null
 let reconnectAttempt = 0
 let shuttingDown = false
+let loggedOut = false
 let mediaQueue = Promise.resolve()
 let mediaQueueLength = 0
 const queuedMediaIds = new Set()
@@ -114,7 +116,7 @@ function downloadAttachments(items) {
 
 function createApi() {
   return createWhatsAppApi({ store, history, accountId, apiToken, writesEnabled, getSocket: () => socket,
-    getConnection: () => ready ? 'connected' : connecting ? 'connecting' : 'disconnected',
+    getConnection: () => ready ? 'connected' : loggedOut ? 'logged_out' : connecting ? 'connecting' : 'disconnected',
     isReady: () => ready, getPairing: () => ({ qr: currentQr, expiresAt: qrExpiresAt }) })
 }
 
@@ -125,7 +127,7 @@ function isLoggedOut(statusCode) {
 async function connectWhatsApp() {
   if (!connectEnabled || shuttingDown || socket) return
   connecting = true
-  const authDir = dataDir
+  const authDir = authSubdirectory ? path.join(dataDir, 'auth') : dataDir
   fs.mkdirSync(authDir, { recursive: true, mode: 0o700 })
   fs.chmodSync(authDir, 0o700)
   try {
@@ -167,8 +169,9 @@ async function connectWhatsApp() {
         qrExpiresAt = null
         if (socket === currentSocket) socket = null
         const statusCode = Number(lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || 0)
+        loggedOut = isLoggedOut(statusCode)
         logger.warn({ statusCode }, 'WhatsApp transport disconnected')
-        if (!shuttingDown && !isLoggedOut(statusCode) && connectEnabled && !reconnectTimer) {
+        if (!shuttingDown && !isLoggedOut(statusCode) && connectEnabled && !reconnectTimer && reconnectAttempt < 6) {
           const delay = Math.min(60_000, 1000 * (2 ** Math.min(reconnectAttempt++, 6)))
           reconnectTimer = setTimeout(() => {
             reconnectTimer = null
@@ -214,7 +217,7 @@ async function connectWhatsApp() {
     ready = false
     connecting = false
     logger.error({ error: error?.name || 'ConnectionError' }, 'WhatsApp transport connection could not be established')
-    if (!shuttingDown && connectEnabled && !reconnectTimer) {
+    if (!shuttingDown && connectEnabled && !reconnectTimer && reconnectAttempt < 6) {
       const delay = Math.min(60_000, 1000 * (2 ** Math.min(reconnectAttempt++, 6)))
       reconnectTimer = setTimeout(() => { reconnectTimer = null; void connectWhatsApp() }, delay)
       connecting = true
@@ -253,12 +256,19 @@ async function startBridge() {
     store.expireEphemeral()
     history.expireStalledInitialSync()
   }, 30_000)
+  // Managed children cannot outlive a crashed application and keep a stale
+  // auth directory open after its process lock has been released.
+  const parentPid = Number(process.env.WHATSAPP_PARENT_PID || 0)
+  const parentTimer = parentPid ? setInterval(() => {
+    if (process.ppid !== parentPid) shutdown()
+  }, 1000) : null
   if (connectEnabled) void connectWhatsApp()
   else logger.info('WhatsApp provider connection is disabled; set WHATSAPP_CONNECT=true to begin user-controlled pairing')
   const shutdown = () => {
     if (shuttingDown) return
     shuttingDown = true
     clearInterval(expiryTimer)
+    clearInterval(parentTimer)
     clearTimeout(reconnectTimer)
     reconnectTimer = null
     try { socket?.end(undefined) } catch { /* connection is already closed */ }

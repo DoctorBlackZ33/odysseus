@@ -36,6 +36,7 @@ class AssistantSettingsUpdate(BaseModel):
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
     enabled_tools: Optional[list[str]] = None
+    connector_account_ids: Optional[list[str]] = None
     allow_autonomous_email: Optional[bool] = None  # convenience toggle
     timezone: Optional[str] = None
     check_ins: Optional[list[CheckInUpdate]] = None
@@ -58,6 +59,7 @@ def _crew_to_dict(c: CrewMember) -> dict:
         "endpoint_url": c.endpoint_url,
         "greeting": c.greeting,
         "enabled_tools": tools,
+        "connector_account_ids": json.loads(c.connector_account_ids) if c.connector_account_ids is not None else None,
         "session_id": c.session_id,
         "is_default_assistant": bool(c.is_default_assistant),
         "timezone": c.timezone,
@@ -192,6 +194,12 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
             # Tool list: either explicit list, or implicit toggle.
             if payload.enabled_tools is not None:
                 crew_db.enabled_tools = json.dumps(payload.enabled_tools)
+            if "connector_account_ids" in payload.model_fields_set:
+                from services.connector_grants import validate_selection
+                try:
+                    crew_db.connector_account_ids = validate_selection(db, owner, payload.connector_account_ids)
+                except ValueError as exc:
+                    raise HTTPException(400, str(exc)) from None
             if payload.allow_autonomous_email is not None:
                 try:
                     existing = json.loads(crew_db.enabled_tools) if crew_db.enabled_tools else []

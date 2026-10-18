@@ -64,10 +64,9 @@ DEFAULT_SETTINGS = {
     "stt_model": "base",
     "stt_language": "",
     "search_provider": "searxng",
-    # Default fallback chain — when the primary provider fails or
-    # rate-limits, we try DuckDuckGo next. Free, no API key required, so
-    # safe to ship on by default for every user.
-    "search_fallback_chain": ["duckduckgo"],
+    # Cross-provider fallback changes where queries are disclosed; opt in
+    # explicitly rather than silently sending failed searches elsewhere.
+    "search_fallback_chain": [],
     "search_url": "",
     "search_result_count": 5,
     # SafeSearch level applied to every provider that exposes one.

@@ -1774,6 +1774,12 @@ def test_real_connector_dispatch_preserves_owner_citations_and_external_gate(
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setattr(capabilities, "TOOL_APPROVAL_GATE_ENABLED", True)
     _disable_vectors(monkeypatch)
+    import core.database as database
+    monkeypatch.setattr(database, "SessionLocal", connector_store_db.SessionLocal)
+    with connector_store_db.SessionLocal() as db:
+        db.add(database.Session(id="synthetic", owner="alice", name="Synthetic",
+                                endpoint_url="", model=""))
+        db.commit()
     alice = connector_store_db.upsert_source_record(
         "alice", provider="moodle", account_id="a", source_type="course",
         external_id="1", title="Synthetic course", content="quasar-owner-alice",

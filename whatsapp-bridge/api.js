@@ -34,6 +34,11 @@ export function createWhatsAppApi({ store, history, accountId, apiToken, getSock
   if (typeof apiToken !== 'string' || apiToken.length < 32) throw new Error('WHATSAPP_API_TOKEN must contain at least 32 characters')
   const app = Express()
   app.disable('x-powered-by')
+  const freshPairing = () => {
+    const value = getPairing() || {}
+    return value.qr && value.expiresAt && Date.parse(value.expiresAt) > Date.now()
+      ? value : { qr: null, expiresAt: null }
+  }
   app.use((req, res, next) => {
     const auth = req.get('authorization') || ''
     const match = /^Bearer ([^\s]+)$/.exec(auth)
@@ -44,12 +49,13 @@ export function createWhatsAppApi({ store, history, accountId, apiToken, getSock
   app.use(Express.json({ limit: '15mb', strict: true }))
 
   app.get('/api/v1/status', (_req, res) => {
-    res.json({ accountId, connection: getConnection(), ready: isReady(), qrAvailable: Boolean(getPairing()?.qr),
+    res.json({ accountId, connection: getConnection(), ready: isReady(), qrAvailable: Boolean(freshPairing().qr),
       initialHistory: history.progress().initial, provider: 'whatsapp-baileys' })
   })
 
   app.get('/api/v1/pairing', (_req, res) => {
-    const pairing = getPairing() || {}
+    res.set('Cache-Control', 'private, no-store')
+    const pairing = freshPairing()
     res.json({ accountId, available: Boolean(pairing.qr), qr: pairing.qr || null,
       expiresAt: pairing.expiresAt || null, connection: getConnection() })
   })

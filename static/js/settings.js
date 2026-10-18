@@ -65,6 +65,16 @@ const _shell = createSettingsShell({
   getAdminModule: () => window.adminModule,
 });
 
+// Bind the sidebar entry before lazy Settings initialization.
+const openIntegrationsButton = el('sidebar-integrations-btn');
+if (openIntegrationsButton && openIntegrationsButton.dataset.bound !== '1') {
+  openIntegrationsButton.dataset.bound = '1';
+  openIntegrationsButton.addEventListener('click', () => {
+    if (window._isAdmin && window.adminModule?.open) window.adminModule.open('integrations');
+    else open('integrations');
+  });
+}
+
 /* ═══════════════════════════════════════════
    AI TAB
    ═══════════════════════════════════════════ */
@@ -775,13 +785,13 @@ var _LINK = function(href, text) {
   return '<a href="' + href + '" target="_blank" rel="noopener noreferrer" style="color:var(--accent, var(--red));text-decoration:underline;">' + text + '</a>';
 };
 var _searchProviderHints = {
-  searxng: 'Private, self-hosted instance. Leave URL empty to use the SEARXNG_INSTANCE env var.',
-  duckduckgo: 'No API key needed, but rate-limited — heavy use can return empty results. Configure a fallback below.',
-  brave: 'Get your API key from ' + _LINK('https://brave.com/search/api/', 'brave.com/search/api'),
-  google_pse: 'Requires a Google API key and a Programmable Search Engine ID (CX). Create one at ' + _LINK('https://programmablesearchengine.google.com/', 'programmablesearchengine.google.com'),
-  tavily: 'AI-optimized search. 1,000 free credits/month at ' + _LINK('https://tavily.com/', 'tavily.com'),
-  serper: 'Google results via API. 2,500 free queries at ' + _LINK('https://serper.dev/', 'serper.dev'),
-  disabled: 'Web search and deep research tools will be unavailable.',
+  searxng: 'Recommended: the app-managed SearXNG service is the private, no-key default. The service is supplied with the Odysseus deployment; choose Test to check that it is responding. Queries stay with the selected provider unless you explicitly add a fallback.',
+  duckduckgo: 'No API key needed. Choosing DuckDuckGo sends searches to DuckDuckGo; rate limits may produce empty results. Any fallback provider must be selected below.',
+  brave: 'Brave Search needs an API key. ' + _LINK('https://api-dashboard.search.brave.com/register', 'Create a Brave Search API key') + '<ol><li>Sign in or create an account in the Brave Search API dashboard.</li><li>Choose a plan and create an API subscription.</li><li>Copy its API key into the field below, then save and test.</li></ol>',
+  google_pse: 'Existing eligible Google Custom Search API customers only; the API is closed to new customers and sunsets 1 January 2027. Choose another provider if you are new. Existing projects need an API key and Search Engine ID (CX). ' + _LINK('https://developers.google.com/custom-search/v1/overview', 'Check Google API eligibility') + ' · ' + _LINK('https://programmablesearchengine.google.com/controlpanel/create', 'Configure an existing search engine'),
+  tavily: 'Tavily requires an API key. ' + _LINK('https://app.tavily.com', 'Create a Tavily account and key') + '<ol><li>Sign in or create an account.</li><li>Create/copy an API key from the dashboard.</li><li>Paste the key below, then save and test.</li></ol>',
+  serper: 'Serper requires an API key. ' + _LINK('https://serper.dev/signup', 'Create a Serper account and key') + '<ol><li>Sign in or create an account.</li><li>Copy the API key from the dashboard.</li><li>Paste the key below, then save and test.</li></ol>',
+  disabled: 'Web search and deep-research search are unavailable while this is selected.',
 };
 var _searchNeedsKey = { brave: 1, google_pse: 1, tavily: 1, serper: 1 };
 var _searchLabels = {
@@ -792,7 +802,6 @@ var _searchKeyFields = {
   brave: 'brave_api_key', google_pse: 'google_pse_key',
   tavily: 'tavily_api_key', serper: 'serper_api_key',
 };
-
 async function initSearchSettings() {
   var provSel = el('set-searchProvider');
   var countSel = el('set-searchResultCount');
@@ -801,29 +810,68 @@ async function initSearchSettings() {
   var urlRow = el('set-searchUrlRow');
   var keyInput = el('set-searchApiKey');
   var keyRow = el('set-searchKeyRow');
+  var keyHelp = el('set-searchKeyHelp');
   var cxInput = el('set-searchCx');
   var cxRow = el('set-searchCxRow');
   var hint = el('set-searchHint');
   var msg = el('set-searchMsg');
   var _settings = {};
-
+  var _searchKeyConfigured = {};
+  var _searchSetup = {};
+  var _lastSearchTest = null;
   function keyFieldFor(prov) { return _searchKeyFields[prov] || ''; }
 
-  function loadKeyForProvider(prov) {
-    var field = keyFieldFor(prov);
-    keyInput.value = field ? (_settings[field] || _settings.search_api_key || '') : '';
+  function loadKeyForProvider() {
+    // Provider API secrets are write-only in this panel and are never echoed back.
+    keyInput.value = '';
+    keyInput.autocomplete = 'new-password';
+  }
+
+  function retainSearchSettingsWithoutSecrets(settings) {
+    _searchKeyConfigured = {};
+    for (var field of Object.values(_searchKeyFields)) {
+      _searchKeyConfigured[field] = !!(String(settings[field] || '').trim());
+      delete settings[field];
+    }
+    _searchKeyConfigured.search_api_key = !!(String(settings.search_api_key || '').trim());
+    delete settings.search_api_key;
+    _settings = settings;
+  }
+
+  function searchProviderMetadata(provider) {
+    return (_searchSetup.providers || []).find(item => item.id === provider) || {};
   }
 
   function updateVisibility() {
     var prov = provSel.value;
     urlRow.style.display = prov === 'searxng' ? 'flex' : 'none';
     keyRow.style.display = _searchNeedsKey[prov] ? 'flex' : 'none';
+    if (keyHelp) keyHelp.style.display = _searchNeedsKey[prov] ? 'block' : 'none';
     cxRow.style.display = prov === 'google_pse' ? 'flex' : 'none';
-    hint.innerHTML = _searchProviderHints[prov] || '';
-    if (prov === 'brave') keyInput.placeholder = 'Brave API key';
-    else if (prov === 'google_pse') keyInput.placeholder = 'Google API key';
-    else if (prov === 'tavily') keyInput.placeholder = 'Tavily API key';
-    else if (prov === 'serper') keyInput.placeholder = 'Serper API key';
+    const provider = searchProviderMetadata(prov);
+    const help = provider.help || {};
+    const providerLinks = (help.links || []).map(link => {
+      try {
+        const href = new URL(link.url);
+        if (href.protocol !== 'https:') return '';
+        return _LINK(href.href, esc(link.label || 'Provider setup'));
+      } catch (_) { return ''; }
+    }).filter(Boolean);
+    const steps = (help.steps || []).map(step => `<li>${esc(step)}</li>`).join('');
+    const details = [
+      provider.description ? `<p>${esc(provider.description)}</p>` : '',
+      help.url ? (() => {
+        try { const href = new URL(help.url); return href.protocol === 'https:' ? _LINK(href.href, 'Provider setup guide') : ''; }
+        catch (_) { return ''; }
+      })() : '',
+      providerLinks.length ? `<p>${providerLinks.join(' · ')}</p>` : '',
+      steps ? `<ol>${steps}</ol>` : '',
+    ].filter(Boolean).join('');
+    hint.innerHTML = `<div class="integration-help"><p><strong>Shared administrator setting</strong> — applies to all users, not a personal account.</p>${help.steps?.length ? '' : (_searchProviderHints[prov] || '')}${details ? `<div>${details}</div>` : ''}</div>`;
+    if (prov === 'brave') keyInput.placeholder = 'Brave API key (hidden after saving)';
+    else if (prov === 'google_pse') keyInput.placeholder = 'Google API key (hidden after saving)';
+    else if (prov === 'tavily') keyInput.placeholder = 'Tavily API key (hidden after saving)';
+    else if (prov === 'serper') keyInput.placeholder = 'Serper API key (hidden after saving)';
     else keyInput.placeholder = 'API key';
     loadKeyForProvider(prov);
   }
@@ -841,14 +889,54 @@ async function initSearchSettings() {
     }
   }
 
+  async function loadSearchSetup() {
+    const response = await fetch('/api/connectors/setup', { credentials: 'same-origin' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || `Setup status unavailable (${response.status}).`);
+    _searchSetup = data.search || {};
+    for (const provider of _searchSetup.providers || []) {
+      if (provider.id) _searchKeyConfigured[provider.id] = !!provider.configured;
+    }
+  }
+
+  async function postSearchSetup(body) {
+    const response = await fetch('/api/connectors/setup/search', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(result.detail || result.message || `Could not configure search (${response.status}).`);
+      error.status = response.status;
+      throw error;
+    }
+    return result;
+  }
+
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    _settings = await res.json();
-    if (_settings.search_provider) provSel.value = _settings.search_provider;
+    const [res] = await Promise.all([
+      fetch('/api/auth/settings', { credentials: 'same-origin' }),
+      loadSearchSetup(),
+    ]);
+    const initial = await res.json();
+    retainSearchSettingsWithoutSecrets(initial);
+    if (_searchSetup.active_provider) provSel.value = _searchSetup.active_provider;
+    else if (_settings.search_provider) provSel.value = _settings.search_provider;
     updateCountDisplay();
     if (_settings.search_url) urlInput.value = _settings.search_url;
     if (_settings.google_pse_cx) cxInput.value = _settings.google_pse_cx;
-  } catch (e) { console.warn('Failed to load search settings', e); }
+    if (_searchSetup.can_configure === false) {
+      for (const control of [provSel, countSel, countCustomInput, urlInput, keyInput, cxInput]) control.disabled = true;
+      const testButton = el('set-searchTestBtn');
+      if (testButton) testButton.disabled = true;
+      msg.textContent = _searchSetup.message || 'Administrator access is required to configure search.';
+    }
+  } catch (e) {
+    msg.textContent = e.message || 'Search setup information is unavailable.';
+    msg.style.color = 'var(--red)';
+  }
 
   countSel.addEventListener('change', function() {
     if (this.value === 'custom') {
@@ -863,56 +951,65 @@ async function initSearchSettings() {
 
   async function refreshStatus() {
     try {
-      var sRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-      var s = await sRes.json();
-      _settings = s;
-      var active = s.search_provider || 'searxng';
-      var label = _searchLabels[active] || active;
-      var extra = '';
-      var kf = keyFieldFor(active);
-      var hasKey = kf ? ((s[kf] || '').trim() || (s.search_api_key || '').trim()) : false;
-      if (_searchNeedsKey[active]) {
-        extra = hasKey ? ' (key set)' : ' (no key)';
-      } else if (active === 'searxng' && (s.search_url || '').trim()) {
-        extra = ' (' + s.search_url + ')';
-      }
-      var count = s.search_result_count || 5;
-      msg.textContent = 'Active: ' + label + extra + ' \u00b7 ' + count + ' results';
-      msg.style.color = active === 'disabled' ? 'var(--red)' : (_searchNeedsKey[active] && !hasKey) ? 'var(--red)' : 'var(--fg)';
-    } catch (e) { /* ignore */ }
+      await loadSearchSetup();
+      const active = _searchSetup.active_provider || 'searxng';
+      const provider = searchProviderMetadata(active);
+      const label = _searchLabels[active] || provider.label || active;
+      const count = _settings.search_result_count || 5;
+      const extra = _searchNeedsKey[active]
+        ? (provider.configured ? ' · API key saved (hidden)' : ' · API key required')
+        : active === 'searxng' && (urlInput.value || '').trim() ? ` · ${urlInput.value.trim()}` : '';
+      const test = _lastSearchTest?.provider === active ? _lastSearchTest : null;
+      const state = test?.state === 'connected'
+        ? ` · Test connected${Number.isInteger(test.result_count) ? ` (${test.result_count} results)` : ''}`
+        : test?.state === 'error' || test?.state === 'setup_required'
+          ? ` · Test ${test.state.replace(/_/g, ' ')}${test.error ? `: ${typeof test.error === 'string' ? test.error : test.error.message || 'Check provider setup.'}` : ''}`
+          : '';
+      msg.textContent = `${label}${extra}${state} · ${count} results per query${_searchSetup.message ? ` · ${_searchSetup.message}` : ''}`;
+      msg.style.color = active === 'disabled' || (_searchNeedsKey[active] && !provider.configured) || test?.state === 'error' || test?.state === 'setup_required'
+        ? 'var(--red)' : 'var(--fg)';
+    } catch (e) {
+      msg.textContent = `Search setup status unavailable: ${e.message || 'try again.'}`;
+      msg.style.color = 'var(--red)';
+    }
   }
   refreshStatus();
 
   async function saveSearch() {
+    const prov = provSel.value;
+    const customVal = countSel.value === 'custom' ? parseInt(countCustomInput.value, 10) : NaN;
+    const resultCount = countSel.value === 'custom'
+      ? (!isNaN(customVal) && customVal >= 1 && customVal <= 100 ? customVal : (_settings.search_result_count || 5))
+      : parseInt(countSel.value, 10);
+    const enteredKey = keyInput.value.trim();
+    const payload = { provider: prov };
+    if (enteredKey) payload.api_key = enteredKey;
+    if (prov === 'google_pse') payload.google_pse_cx = cxInput.value.trim();
+    if (prov === 'searxng') payload.search_url = urlInput.value.trim();
     try {
-      var prov = provSel.value;
-      var resultCount;
-      if (countSel.value === 'custom') {
-        var customVal = parseInt(countCustomInput.value, 10);
-        if (isNaN(customVal) || customVal < 1 || customVal > 100) {
-          resultCount = _settings.search_result_count || 5;
-        } else {
-          resultCount = customVal;
-        }
-      } else {
-        resultCount = parseInt(countSel.value, 10);
-      }
-      var payload = {
-        search_provider: prov,
-        search_result_count: resultCount,
-        search_url: urlInput.value.trim(),
-        google_pse_cx: cxInput.value.trim(),
-      };
-      var kf = keyFieldFor(prov);
-      if (kf) {
-        payload[kf] = keyInput.value.trim();
-        _settings[kf] = keyInput.value.trim();
-      }
-      await _postSettings(payload);
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
-      setTimeout(refreshStatus, 2000);
+      await postSearchSetup(payload);
+      const provider = searchProviderMetadata(prov);
+      if (enteredKey) _searchKeyConfigured[prov] = true;
+      if (provider) provider.configured = true;
+      _searchSetup.active_provider = prov;
+      await _postSettings({ search_result_count: resultCount });
+      _settings.search_result_count = resultCount;
+      const explicitFallbacks = Array.isArray(_settings.search_fallback_chain) ? _settings.search_fallback_chain : [];
+      if (explicitFallbacks.length) await _postSettings({ search_fallback_chain: explicitFallbacks });
+      keyInput.value = '';
+      msg.textContent = 'Search provider settings saved; test the selected provider to confirm it responds.';
+      msg.style.color = 'var(--fg)';
+      setTimeout(refreshStatus, 200);
       if (searchModule && searchModule.refresh) searchModule.refresh();
-    } catch (e) { msg.textContent = e.status === 403 ? 'Admin access is required to change these settings.' : 'Failed to save'; msg.style.color = 'var(--red)'; }
+      return true;
+    } catch (e) {
+      keyInput.value = '';
+      msg.textContent = e.status === 403
+        ? 'Administrator access is required to change search settings.'
+        : e.message || 'Failed to save search settings.';
+      msg.style.color = 'var(--red)';
+      return false;
+    }
   }
 
   provSel.addEventListener('change', function() { updateVisibility(); saveSearch(); _syncSearchPicker(); });
@@ -934,10 +1031,11 @@ async function initSearchSettings() {
     pickerMenu.innerHTML = Array.from(provSel.options).map(function(o) {
       var logo = _searchProviderLogoSvg(o.dataset.searchLogo);
       var active = o.value === provSel.value ? ' active' : '';
-      return '<div class="adm-provider-item' + active + '" role="option" data-value="' + o.value.replace(/"/g, '&quot;') + '">' +
-        '<span class="adm-provider-logo">' + logo + '</span>' +
+      var selected = o.value === provSel.value ? 'true' : 'false';
+      return '<button type="button" class="adm-provider-item' + active + '" role="option" aria-selected="' + selected + '" tabindex="-1" data-value="' + o.value.replace(/"/g, '&quot;') + '" style="width:100%;border:0;background:transparent;color:inherit;font:inherit;text-align:left;">' +
+        '<span class="adm-provider-logo" aria-hidden="true">' + logo + '</span>' +
         '<span>' + o.textContent + '</span>' +
-      '</div>';
+      '</button>';
     }).join('');
   }
   function _syncSearchPicker() {
@@ -946,24 +1044,64 @@ async function initSearchSettings() {
     var logo = _searchProviderLogoSvg(opt.dataset.searchLogo);
     pickerCurrent.querySelector('.adm-provider-logo').innerHTML = logo;
     pickerCurrent.querySelector('.adm-provider-name').textContent = opt.textContent;
+    pickerMenu?.querySelectorAll('.adm-provider-item').forEach(item => {
+      const active = item.dataset.value === opt.value;
+      item.setAttribute('aria-selected', String(active));
+      item.classList.toggle('active', active);
+    });
   }
   if (picker && pickerBtn && pickerMenu && pickerCurrent) {
+    const closePicker = restoreFocus => {
+      pickerMenu.classList.add('hidden');
+      pickerBtn.setAttribute('aria-expanded', 'false');
+      if (restoreFocus) pickerBtn.focus();
+    };
+    const focusCurrentOption = () => {
+      (pickerMenu.querySelector('.adm-provider-item[aria-selected="true"]') || pickerMenu.querySelector('.adm-provider-item'))?.focus();
+    };
     _renderSearchPickerMenu();
     _syncSearchPicker();
     pickerBtn.addEventListener('click', function(e) {
       e.stopPropagation();
-      pickerMenu.classList.toggle('hidden');
+      const opening = pickerMenu.classList.contains('hidden');
+      pickerMenu.classList.toggle('hidden', !opening);
+      pickerBtn.setAttribute('aria-expanded', String(opening));
+      if (opening) focusCurrentOption();
+    });
+    pickerBtn.addEventListener('keydown', event => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (pickerMenu.classList.contains('hidden')) {
+          pickerMenu.classList.remove('hidden');
+          pickerBtn.setAttribute('aria-expanded', 'true');
+        }
+        focusCurrentOption();
+      }
     });
     pickerMenu.addEventListener('click', function(e) {
       var item = e.target.closest('.adm-provider-item');
       if (!item) return;
       provSel.value = item.dataset.value;
       provSel.dispatchEvent(new Event('change', { bubbles: true }));
-      pickerMenu.classList.add('hidden');
+      closePicker(true);
       _renderSearchPickerMenu();
+      _syncSearchPicker();
+    });
+    pickerMenu.addEventListener('keydown', event => {
+      const items = Array.from(pickerMenu.querySelectorAll('.adm-provider-item'));
+      const current = items.indexOf(document.activeElement);
+      let next = current;
+      if (event.key === 'ArrowDown') next = (current + 1 + items.length) % items.length;
+      else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = items.length - 1;
+      else if (event.key === 'Escape') { event.preventDefault(); closePicker(true); return; }
+      else return;
+      event.preventDefault();
+      items[next]?.focus();
     });
     document.addEventListener('click', function(e) {
-      if (!picker.contains(e.target)) pickerMenu.classList.add('hidden');
+      if (!picker.contains(e.target)) closePicker(false);
     });
   }
 
@@ -1070,58 +1208,46 @@ async function initSearchSettings() {
   // Re-render whenever the primary changes (it gets filtered out of "Add").
   provSel.addEventListener('change', _renderFallbackChain);
 
-  // ── Test button ── runs a one-off query against the configured provider.
+  // Test the selected provider using the setup endpoint; no query text or result content is retained here.
   var testBtn = el('set-searchTestBtn');
   if (testBtn) {
     testBtn.addEventListener('click', async function() {
-      var prov = provSel.value;
-      if (!prov || prov === 'disabled') {
-        msg.textContent = 'Pick a provider first';
+      if (!provSel.value || provSel.value === 'disabled') {
+        msg.textContent = 'Choose an active provider before testing.';
         msg.style.color = 'var(--red)';
         return;
       }
-      // Persist current form values first so the test uses what's on screen.
-      await saveSearch();
       testBtn.disabled = true;
-      var origHtml = testBtn.innerHTML;
-      var wp = null;
+      const originalHtml = testBtn.innerHTML;
       try {
-        var sp = window.spinnerModule || (await import('./spinner.js')).default;
-        wp = sp.createWhirlpool(11);
-        wp.element.style.cssText = 'display:inline-flex;width:11px;height:11px;margin:0 4px 0 0;';
-        testBtn.innerHTML = '';
-        testBtn.appendChild(wp.element);
-        testBtn.appendChild(document.createTextNode('Testing'));
-      } catch (_) {
-        testBtn.innerHTML = origHtml.replace(/>Test\s*$/, '>Testing...');
-      }
-      msg.textContent = '';
-      var t0 = performance.now();
-      try {
-        var fd = new FormData();
-        fd.append('query', 'hello world');
-        fd.append('provider', prov);
-        fd.append('count', '3');
-        var r = await fetch('/api/search/query', { method: 'POST', body: fd, credentials: 'same-origin' });
-        var d = await r.json();
-        var ms = Math.round(performance.now() - t0);
-        if (d.error) {
-          msg.textContent = '✗ ' + d.error + ' (' + ms + 'ms)';
-          msg.style.color = 'var(--red)';
-        } else if (!d.results || !d.results.length) {
-          msg.textContent = '⚠ No results returned (' + ms + 'ms)';
-          msg.style.color = 'var(--red)';
-        } else {
-          var topTitle = (d.results[0].title || d.results[0].url || '').slice(0, 60);
-          msg.textContent = '✓ ' + d.results.length + ' result' + (d.results.length === 1 ? '' : 's') + ' · ' + ms + 'ms · top: ' + topTitle;
+        const saved = await saveSearch();
+        if (!saved) return;
+        testBtn.textContent = 'Testing…';
+        msg.textContent = 'Checking the selected search provider…';
+        msg.style.color = 'var(--fg)';
+        const response = await fetch('/api/connectors/setup/search/test', {
+          method: 'POST',
+          credentials: 'same-origin',
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.detail || result.message || `Search test failed (${response.status}).`);
+        _lastSearchTest = result;
+        if (result.state === 'connected') {
+          msg.textContent = `Search provider responds${Number.isInteger(result.result_count) ? ` · ${result.result_count} results` : ''}.`;
           msg.style.color = 'var(--fg)';
+        } else {
+          const reason = typeof result.error === 'string' ? result.error : result.error?.message;
+          msg.textContent = `Search test ${String(result.state || 'failed').replace(/_/g, ' ')}${reason ? `: ${reason}` : '. Check the provider setup above.'}`;
+          msg.style.color = 'var(--red)';
         }
-      } catch (e) {
-        msg.textContent = '✗ Test failed: ' + (e && e.message ? e.message : e);
+        await refreshStatus();
+      } catch (error) {
+        _lastSearchTest = { provider: provSel.value, state: 'error', error: error.message };
+        msg.textContent = error.message || 'Search provider test failed. Check the setup guide and retry.';
         msg.style.color = 'var(--red)';
       } finally {
-        if (wp) { try { wp.destroy(); } catch (_) {} }
-        testBtn.disabled = false; testBtn.innerHTML = origHtml;
+        testBtn.disabled = false;
+        testBtn.innerHTML = originalHtml;
       }
     });
   }
@@ -2537,6 +2663,8 @@ async function initEmailAccountsSettings() {
         <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="eaf-display-name" class="settings-input" placeholder="Your Name" value="${esc(a.display_name || '')}"></div>
         <div id="eaf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
           <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
+          <p class="integration-help">The deployment may already have a Google OAuth client. Only if Connect with Google cannot start, ask the Odysseus deployment administrator to configure it—users do not need to edit environment files.</p>
+          <ol class="integration-help"><li><a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener noreferrer">Enable the Gmail API</a> in the Google Cloud project.</li><li>Configure the <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener noreferrer">OAuth consent screen</a>, including audience and any required test users.</li><li>Create a Web application OAuth client in <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Credentials</a>; register the exact redirect URI supplied by this Odysseus deployment. Ask its administrator for that URI—do not guess.</li><li>The administrator configures the client credentials, then you can use Connect with Google and complete consent yourself.</li></ol>
           <div id="eaf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${a.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
           <button type="button" id="eaf-oauth-btn" class="admin-btn-add" style="font-size:11px">${a.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
         </div>
@@ -3182,10 +3310,42 @@ async function initUnifiedIntegrations() {
   const listEl = el('unified-integrations-list');
   if (!listEl || listEl._unifiedIntegrationsInitialized) return;
   listEl._unifiedIntegrationsInitialized = true;
+  el('integration-agent-access')?.addEventListener('click', async () => {
+    const { openAssistantSettings } = await import('./assistant.js');
+    await openAssistantSettings();
+  });
   const formEl = el('unified-intg-form');
   const addBtn = el('unified-intg-add-btn');
   let integrationNotice = '';
+  let connectorSetupMetadata = null;
+  let connectorSetupMetadataError = '';
+  let activeSetupPoll = null;
+  let activeSetupRequest = null;
+  let setupPollTimer = null;
 
+  function cleanupSetupPolling() {
+    if (setupPollTimer) clearTimeout(setupPollTimer);
+    setupPollTimer = null;
+    if (activeSetupPoll) activeSetupPoll.abort();
+    activeSetupPoll = null;
+    if (activeSetupRequest) activeSetupRequest.abort();
+    activeSetupRequest = null;
+    formEl?.querySelectorAll('input[type="password"]').forEach(input => { input.value = ''; });
+  }
+
+  const settingsModal = el('settings-modal');
+  if (settingsModal && !settingsModal._connectorSetupCleanupObserver) {
+    settingsModal._connectorSetupCleanupObserver = new MutationObserver(() => {
+      if (settingsModal.classList.contains('hidden')) cleanupSetupPolling();
+    });
+    settingsModal._connectorSetupCleanupObserver.observe(settingsModal, { attributes: true, attributeFilter: ['class'] });
+  }
+  if (formEl && !formEl._connectorSetupCleanupObserver) {
+    formEl._connectorSetupCleanupObserver = new MutationObserver(() => {
+      if (formEl.style.display === 'none') cleanupSetupPolling();
+    });
+    formEl._connectorSetupCleanupObserver.observe(formEl, { attributes: true, attributeFilter: ['style'] });
+  }
   // Hide the "+ Add Integration" button whenever the per-type create form
   // is open so it doesn't compete visually with the in-progress form.
   // Many call sites toggle formEl.style.display directly; observe instead
@@ -3261,15 +3421,16 @@ async function initUnifiedIntegrations() {
     }
     for (const acc of (connectorRes.accounts || [])) {
       const config = acc.config || {};
-      const detailParts = [acc.status || 'setup required'];
-      if (acc.last_sync_at) detailParts.push(`synced ${new Date(acc.last_sync_at).toLocaleString()}`);
+      const setupState = acc.setup_status || acc.status || 'setup_required';
+      const detailParts = [];
       if (['moodle', 'whatsapp'].includes(acc.provider)) {
-        detailParts.push(config.semantic_index ? 'semantic indexing on' : 'keyword retrieval');
-        if (config.auto_sync) detailParts.push(`auto-sync every ${Number(config.sync_interval_minutes || 30)} min`);
+        detailParts.push(config.semantic_index ? (acc.index_status || 'Semantic indexing enabled') : 'Keyword retrieval only · semantic indexing off');
+        if (config.auto_sync) detailParts.push(`Automatic pull every ${Number(config.sync_interval_minutes || 30)} min`);
       }
-      if (acc.last_error) detailParts.push(acc.last_error);
-      const detail = detailParts.join(' · ');
-      items.push({ type: acc.provider, id: acc.id, name: acc.name, detail, enabled: acc.status === 'connected', data: acc });
+      if (acc.last_sync_at) detailParts.push(`Last sync ${new Date(acc.last_sync_at).toLocaleString()}`);
+      if (acc.provider === 'whatsapp') detailParts.push(acc.write_enabled ? 'Outbound permission on' : 'Outbound permission off');
+      if (acc.last_error) detailParts.push('Needs attention; open settings for details.');
+      items.push({ type: acc.provider, id: acc.id, name: acc.name, detail: detailParts.join(' · '), enabled: setupState === 'connected', setupState, data: acc });
     }
     items.push({ type: 'shopping', id: 'shopping-search', name: 'Product discovery', detail: 'Public merchant listings · no checkout', enabled: true, data: {} });
     // MCP servers
@@ -3298,18 +3459,27 @@ async function initUnifiedIntegrations() {
 
   function renderCard(item) {
     const t = INTG_TYPES[item.type] || INTG_TYPES.api;
+    const data = item.data || {};
+    const setupState = item.setupState || data.setup_status || data.status;
+    const statusLabel = item.type === 'browser' && setupState === 'connected'
+      ? 'Browser profile active · site sign-in not verified'
+      : ['moodle', 'whatsapp', 'maps', 'browser'].includes(item.type)
+        ? connectorSetupStateLabel(setupState)
+        : item.enabled ? 'Available' : 'Disabled';
     const statusDot = item.enabled
-      ? '<span style="width:8px;height:8px;border-radius:50%;background:var(--color-success,#50fa7b);flex-shrink:0" title="Active"></span>'
-      : '<span style="width:8px;height:8px;border-radius:50%;background:var(--fg);opacity:0.3;flex-shrink:0" title="Disabled"></span>';
+      ? '<span class="integration-status-dot" aria-hidden="true"></span>'
+      : '<span class="integration-status-dot integration-status-dot-idle" aria-hidden="true"></span>';
     const canDelete = !['gmail_index', 'shopping'].includes(item.type);
-    return `<div class="intg-card" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;cursor:pointer;transition:all 0.15s;" title="Click to edit">
-      <span style="color:var(--accent, var(--red));flex-shrink:0">${t.icon}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px">${esc(item.name)} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${esc(t.label)}</span></div>
-        <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.detail)}</div>
-      </div>
-      ${statusDot}
-      ${canDelete ? `<button class="admin-btn-sm intg-del-btn" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" data-intg-name="${esc(item.name)}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;display:inline-flex;align-items:center;justify-content:center;">
+    return `<div class="intg-card" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" role="group" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;transition:all 0.15s;">
+      <button type="button" class="integration-card-edit" aria-label="Edit ${esc(item.name)} ${esc(t.label)} settings. Status: ${esc(statusLabel)}." data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}">
+        <span style="color:var(--accent, var(--red));flex-shrink:0">${t.icon}</span>
+        <span style="flex:1;min-width:0">
+          <span style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px">${esc(item.name)} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${esc(t.label)}</span></span>
+          <span style="display:block;font-size:11px;opacity:.72">${statusDot} ${esc(statusLabel)}</span>
+          <span style="display:block;font-size:11px;opacity:.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.detail || 'Open to manage permissions and setup.')}</span>
+        </span>
+      </button>
+      ${canDelete ? `<button type="button" class="admin-btn-sm intg-del-btn" data-intg-id="${esc(item.id)}" data-intg-type="${esc(item.type)}" data-intg-name="${esc(item.name)}" aria-label="Remove ${esc(item.name)}" title="Remove" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.75;display:inline-flex;align-items:center;justify-content:center;">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
       </button>` : ''}
     </div>`;
@@ -3329,12 +3499,11 @@ async function initUnifiedIntegrations() {
       e.stopPropagation();
       _openEmailSettings();
     });
-    listEl.querySelectorAll('.intg-card').forEach(card => {
-      card.addEventListener('click', (e) => {
-        if (e.target.closest('.intg-del-btn')) return;
-        listEl.querySelectorAll('.intg-card.intg-card-active').forEach(c => c.classList.remove('intg-card-active'));
-        card.classList.add('intg-card-active');
-        showForm(card.dataset.intgType, card.dataset.intgId);
+    listEl.querySelectorAll('.integration-card-edit').forEach(button => {
+      button.addEventListener('click', () => {
+        listEl.querySelectorAll('.intg-card.intg-card-active').forEach(card => card.classList.remove('intg-card-active'));
+        button.closest('.intg-card')?.classList.add('intg-card-active');
+        showForm(button.dataset.intgType, button.dataset.intgId);
       });
     });
     listEl.querySelectorAll('.intg-del-btn').forEach(btn => {
@@ -3385,10 +3554,98 @@ async function initUnifiedIntegrations() {
     return result;
   }
 
+  function providerSetupMetadata(provider) {
+    const raw = connectorSetupMetadata?.providers || connectorSetupMetadata?.integrations || [];
+    const providers = Array.isArray(raw) ? raw : Object.values(raw);
+    return providers.find(item =>
+      String(item?.id || item?.provider || item?.key || '') === provider
+    ) || null;
+  }
+
+  function permissionText(value, fallback) {
+    if (Array.isArray(value)) return value.map(item => String(item?.label || item?.name || item)).filter(Boolean).join(', ') || fallback;
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    return fallback;
+  }
+
+  function connectorAccessSummary(provider, metadata) {
+    const fallback = {
+      moodle: { read: 'Enrolled courses, available course materials, and the Moodle calendar.', write: 'No Moodle content is changed.', index: 'Indexing is optional and off until selected.' },
+      whatsapp: { read: 'WhatsApp history available to the connected device; provider history limits apply.', write: 'Outbound messages are off until explicitly enabled.', index: 'Indexing and automatic history pulls are optional and off by default.' },
+      maps: { read: 'Geocoding and directions from OpenRouteService.', write: 'No account data is written.', index: 'No content indexing.' },
+      browser: { read: 'Pages opened in this isolated browser profile.', write: 'Page controls may submit forms; purchase, cart, checkout, and payment actions are blocked.', index: 'No content indexing.' },
+      shopping: { read: 'Public product listings from participating merchants.', write: 'Merchant links are a manual handoff; no cart or purchase actions.', index: 'No content indexing.' },
+    }[provider] || { read: 'Provider-specific data.', write: 'Provider-specific actions.', index: 'Optional where supported.' };
+    const permissions = metadata?.permissions || {};
+    const reads = permissionText(permissions.read ?? metadata?.reads, fallback.read);
+    const writes = permissionText(permissions.write ?? metadata?.writes, fallback.write);
+    const indexing = permissionText(permissions.index ?? metadata?.indexing, fallback.index);
+    return `<div class="integration-help"><strong>What this connection allows</strong><ul><li><b>Read:</b> ${esc(reads)}</li><li><b>Write:</b> ${esc(writes)}</li><li><b>Index / sync:</b> ${esc(indexing)}</li></ul></div>`;
+  }
+
+  function connectorPrerequisites(provider, metadata) {
+    const prerequisites = metadata?.prerequisites ?? metadata?.dependencies;
+    if (prerequisites && !Array.isArray(prerequisites) && typeof prerequisites === 'object') {
+      const readiness = [];
+      if (prerequisites.dependencies_installed === true || prerequisites.available === true) readiness.push('Required service dependencies are ready.');
+      else if (prerequisites.dependencies_installed === false || prerequisites.available === false) readiness.push('Required service dependencies are unavailable.');
+      if (prerequisites.message) readiness.push(String(prerequisites.message));
+      if (readiness.length) return `<p>${readiness.map(esc).join(' ')}</p>`;
+    }
+    const list = Array.isArray(prerequisites) ? prerequisites : [];
+    const items = list.map(item => {
+      if (typeof item === 'string') return `<li>${esc(item)}</li>`;
+      const label = item?.label || item?.name || item?.id;
+      if (!label) return '';
+      const state = item?.status || item?.state || (item?.available === false ? 'unavailable' : item?.available === true ? 'ready' : '');
+      const explanation = item?.message || item?.detail || '';
+      return `<li>${esc(label)}${state ? ` — ${esc(state)}` : ''}${explanation ? `: ${esc(explanation)}` : ''}</li>`;
+    }).filter(Boolean).join('');
+    if (items) return `<ul>${items}</ul>`;
+    if (connectorSetupMetadataError) return `<p>Service readiness could not be checked: ${esc(connectorSetupMetadataError)}. Retry setup status before continuing.</p>`;
+    return `<p>${provider === 'whatsapp'
+      ? 'Odysseus will prepare its managed WhatsApp service when setup starts; no API token or environment editing is needed.'
+      : 'Odysseus will check and prepare supported service dependencies when setup starts.'}</p>`;
+  }
+
+  function connectorSetupStateLabel(state) {
+    return ({
+      starting: 'Preparing service…',
+      awaiting_login: 'Waiting for you to finish sign-in',
+      awaiting_qr: 'Waiting for WhatsApp device pairing',
+      connected: 'Connected',
+      setup_required: 'Setup needs attention',
+      error: 'Setup could not finish',
+      stopped: 'Setup stopped',
+    })[state] || (state ? String(state).replace(/_/g, ' ') : 'Not started');
+  }
+
+  function setConnectorWizardStep(root, activeStep) {
+    root?.querySelectorAll('[data-wizard-step]').forEach(step => {
+      const current = Number(step.dataset.wizardStep) === activeStep;
+      step.setAttribute('aria-current', current ? 'step' : 'false');
+    });
+  }
+
   function showConnectorOutput(target, value, error = false) {
     const node = typeof target === 'string' ? el(target) : target;
     if (!node) return;
-    node.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    if (typeof value === 'string') node.textContent = value;
+    else if (!value || typeof value !== 'object') node.textContent = 'Request completed.';
+    else if (typeof value.message === 'string') node.textContent = value.message;
+    else if (typeof value.summary === 'string') node.textContent = value.summary;
+    else if (value.state || value.status) {
+      const state = value.state || value.status;
+      node.textContent = `${connectorSetupStateLabel(state)}${value.retryable ? ' · Retry is available.' : ''}`;
+    } else if (Number.isFinite(value.records) || Number.isFinite(value.indexed)) {
+      const records = Number.isFinite(value.records) ? value.records : value.indexed;
+      node.textContent = `Sync completed: ${records} record${records === 1 ? '' : 's'} processed.${value.queued ? ` ${value.queued} queued for indexing.` : ''}`;
+    } else if (Array.isArray(value.results) || Array.isArray(value.routes)) {
+      const count = (value.results || value.routes).length;
+      node.textContent = `Found ${count} result${count === 1 ? '' : 's'}.${value.attribution ? ` ${value.attribution}` : ''}`;
+    } else {
+      node.textContent = 'Request completed. Refresh status to see the latest setup and sync state.';
+    }
     node.style.color = error ? 'var(--red)' : '';
   }
 
@@ -3441,10 +3698,699 @@ async function initUnifiedIntegrations() {
     });
   }
 
+  function safeHttpsUrl(raw) {
+    try {
+      const parsed = new URL(String(raw || ''), window.location.origin);
+      return parsed.protocol === 'https:' ? parsed.href : '';
+    } catch (_) { return ''; }
+  }
+
+  function safeMoodleLaunchUrl(raw) {
+    const safeUrl = safeHttpsUrl(raw);
+    if (!safeUrl) return '';
+    try {
+      return new URL(safeUrl).hostname === 'moodle-app2.let.ethz.ch' ? safeUrl : '';
+    } catch (_) { return ''; }
+  }
+
+  function isVerifiedEthPasswordControl(viewUrl, control) {
+    if (!safeHttpsUrl(viewUrl)) return false;
+    try {
+      const origin = new URL(`https://${String(control?.origin || '')}`).hostname.toLowerCase();
+      return origin === 'moodle-app2.let.ethz.ch' || origin === 'aai-logon.ethz.ch';
+    } catch (_) { return false; }
+  }
+
+  function createRemoteField(control) {
+    const tag = String(control.tag || '').toLowerCase();
+    const type = String(control.type || '').toLowerCase();
+    let input;
+    if (tag === 'select' && Array.isArray(control.options)) {
+      input = document.createElement('select');
+      for (const option of control.options) {
+        const item = new Option(String(option.label || option.value || ''), String(option.value ?? ''));
+        item.selected = Boolean(option.selected);
+        input.add(item);
+      }
+    } else if (tag === 'textarea') {
+      input = document.createElement('textarea');
+    } else {
+      input = document.createElement('input');
+      input.type = ['password', 'email', 'number', 'tel', 'url', 'search', 'checkbox', 'radio'].includes(type) ? type : 'text';
+      if (input.type === 'checkbox' || input.type === 'radio') input.checked = Boolean(control.checked);
+      input.autocomplete = input.type === 'password' ? 'current-password' : 'off';
+      input.placeholder = String(control.placeholder || '');
+      input.maxLength = 10000;
+    }
+    input.className = 'settings-input';
+    input.required = Boolean(control.required);
+    input.setAttribute('aria-label', String(control.label || 'Remote field'));
+    return input;
+  }
+
+  function remoteFieldValue(input) {
+    return input.type === 'checkbox' || input.type === 'radio' ? String(input.checked) : input.value;
+  }
+
+  async function showGuidedConnectorForm(type, editId, requestedMethod, autoStart = false) {
+    cleanupSetupPolling();
+    const isMoodle = type === 'moodle';
+    const title = isMoodle ? 'ETH Moodle' : 'WhatsApp';
+    let account = null;
+    if (editId) {
+      try {
+        const data = await connectorRequest('/api/connectors/accounts');
+        account = (data.accounts || []).find(item => item.id === editId) || null;
+      } catch (err) {
+        formEl.innerHTML = `<div class="admin-card" role="alert">${esc(err.message)}</div>`;
+        return;
+      }
+      if (!account) {
+        formEl.innerHTML = '<div class="admin-card" role="alert">Connector account not found.</div>';
+        return;
+      }
+    }
+
+    const metadata = providerSetupMetadata(type);
+    let config = account?.config || {};
+    const methodDefault = isMoodle
+      ? (requestedMethod || (config.auth_mode === 'token' ? 'token' : config.auth_mode === 'normal_browser' ? 'normal_browser' : 'remote'))
+      : (config.mode === 'external' ? 'external' : 'managed');
+    const methods = metadata?.methods || metadata?.connection_methods || [];
+    const supportsExternal = Array.isArray(methods)
+      ? methods.some(item => (typeof item === 'string' ? item : item?.id || item?.value) === 'external')
+      : methods?.external === true;
+    const defaultWriteEnabled = !!(account?.write_enabled ?? config.write_enabled ?? config.allow_outbound);
+    const status = account ? connectorSetupStateLabel(account.setup_status || account.status) : 'Not started';
+    const accessSummary = connectorAccessSummary(type, metadata);
+    const providerDescription = metadata?.description || (isMoodle
+      ? 'Connect your ETH courses and calendar. Odysseus uses the ETH sign-in flow; web-service tokens are optional and advanced.'
+      : 'Odysseus provisions and starts a private WhatsApp service for this account. Pair your phone with a temporary QR code.');
+    const methodMarkup = isMoodle
+      ? `<label class="settings-row"><span class="settings-label">Connection method</span><select id="uf-connector-method" class="settings-input" aria-describedby="uf-connector-method-help"><option value="remote"${methodDefault === 'remote' ? ' selected' : ''}>Sign in with ETH in Odysseus (recommended)</option><option value="normal_browser"${methodDefault === 'normal_browser' ? ' selected' : ''}>Normal browser sign-in (1Password-friendly)</option><option value="token"${methodDefault === 'token' ? ' selected' : ''}>Moodle web-service token (advanced)</option></select></label>
+        <div id="uf-connector-method-help" class="integration-help">ETH Shibboleth and MFA remain under your control. Odysseus never asks you to inspect a page or enter CSS selectors.</div>
+        <div id="uf-moodle-api-guide" class="integration-help" hidden><strong>Advanced: authorized Moodle web-service token</strong><ol><li>Open <a href="https://moodle-app2.let.ethz.ch/user/managetoken.php" target="_blank" rel="noopener noreferrer">Moodle → Manage tokens</a> and sign in.</li><li>Create a token only for an ETH-approved service. If that option is unavailable, use ETH sign-in instead or ask ETH Moodle support whether access is enabled.</li><li>Paste the token below. Odysseus stores it encrypted for this account, never redisplays it, and verifies access before showing Connected.</li></ol><a href="https://docs.moodle.org/en/REST_API_tokens" target="_blank" rel="noopener noreferrer">Moodle token documentation</a></div>
+        <label id="uf-moodle-token-row" class="settings-row" hidden><span class="settings-label">Authorized web-service token</span><input id="uf-connector-secret" class="settings-input" type="password" autocomplete="new-password" spellcheck="false" placeholder="Paste token; hidden after saving"></label>`
+      : `<label class="settings-row"><span class="settings-label">Service</span><select id="uf-connector-method" class="settings-input" aria-describedby="uf-connector-method-help"><option value="managed"${methodDefault === 'managed' ? ' selected' : ''}>Managed by Odysseus (recommended)</option>${supportsExternal || methodDefault === 'external' ? `<option value="external"${methodDefault === 'external' ? ' selected' : ''}>Use an existing external bridge (advanced)</option>` : ''}</select></label>
+        <div id="uf-connector-method-help" class="integration-help">Managed mode prepares the service for you—no API token, environment edit, or separate bridge launch. The external option appears only when this deployment reports that bridge mode is available.</div>`;
+    const indexChecked = !!config.semantic_index;
+    const autoSyncChecked = !!config.auto_sync;
+    const writeAck = account?.write_enabled_acknowledged === true || config.write_enabled_acknowledged === true;
+
+    formEl.style.display = '';
+    formEl.innerHTML = `
+      <div class="admin-card integration-wizard" style="margin-top:8px" data-connector="${esc(type)}">
+        <h2 style="font-size:13px">${editId ? `Manage ${title}` : `Add ${title}`}</h2>
+        <p style="font-size:12px;line-height:1.5;opacity:.78">${esc(providerDescription)}</p>
+        ${accessSummary}
+        <div class="integration-wizard-steps" aria-label="Setup steps">
+          <span class="integration-wizard-step" data-wizard-step="1" aria-current="step">1 · Choose</span>
+          <span class="integration-wizard-step" data-wizard-step="2" aria-current="false">2 · Prepare</span>
+          <span class="integration-wizard-step" data-wizard-step="3" aria-current="false">3 · Sign in / pair</span>
+          <span class="integration-wizard-step" data-wizard-step="4" aria-current="false">4 · Ready</span>
+        </div>
+        <label class="settings-row"><span class="settings-label">Account name</span><input id="uf-connector-name" class="settings-input" maxlength="120" value="${esc(account?.name || title)}" autocomplete="off"></label>
+        ${methodMarkup}
+        <div id="uf-connector-dependencies" class="integration-help"><strong>Service preparation</strong>${connectorPrerequisites(type, metadata)}</div>
+        ${isMoodle ? `
+          <div id="uf-moodle-browser-login" class="integration-help" ${methodDefault === 'token' ? 'hidden' : ''}>
+            <strong>ETH sign-in and password managers</strong>
+            <p>For 1Password, choose normal-browser sign-in, then open the secure ETH handoff link below. Your extension works on ETH itself. After MFA, cancel any app-opening prompt and copy Moodle's “Open app” link address back here. If ETH does not offer that link, use the Odysseus sign-in window instead. Odysseus cannot read your normal browser's cookies; its separate remote profile does not have your local password-manager extension.</p>
+            <a href="https://moodle-app2.let.ethz.ch/auth/shibboleth/login.php" target="_blank" rel="noopener noreferrer">Open ETH Moodle sign-in</a>
+          </div>
+          <div id="uf-moodle-callback-area" class="integration-help" hidden>
+            <strong>Finish the normal-browser handoff</strong>
+            <p id="uf-moodle-handoff-message" role="status" aria-live="polite" hidden></p>
+            <p>After ETH sign-in, copy the Moodle callback link shown by the login handoff and paste it here. Do not open a Moodle mobile-app link. This one-time callback is sent to Odysseus over HTTPS for account-bound verification; it expires and is not saved in this browser.</p>
+            <label class="settings-row"><span class="settings-label">One-time callback link</span><input id="uf-moodle-callback" class="settings-input" type="password" autocomplete="off" spellcheck="false" placeholder="Paste callback link"></label>
+            <button type="button" class="admin-btn-add" id="uf-moodle-finish-handoff">Finish sign-in</button>
+          </div>
+          <div id="uf-moodle-remote-view" aria-label="ETH sign-in window"></div>
+        ` : ''}
+        ${!isMoodle ? `
+          <div id="uf-whatsapp-pairing" class="integration-help" hidden>
+            <strong>Pair a device</strong>
+            <p>On your phone open WhatsApp → <b>Settings</b> → <b>Linked devices</b> → <b>Link a device</b>, then scan the QR shown here. Keep WhatsApp open while it pairs. The QR refreshes while setup is active and expires; if it does, retry pairing.</p>
+            <div id="uf-whatsapp-qr" aria-live="polite"></div>
+          </div>
+          <label class="settings-row"><span class="settings-label">Semantic indexing (optional)</span><input id="uf-connector-semantic" type="checkbox"${indexChecked ? ' checked' : ''}></label>
+          <label class="settings-row"><span class="settings-label">Automatic history pull</span><input id="uf-connector-auto" type="checkbox"${autoSyncChecked ? ' checked' : ''}></label>
+          <label class="settings-row"><span class="settings-label">Pull interval (minutes)</span><input id="uf-connector-interval" class="settings-input" type="number" min="5" max="1440" value="${Number(config.sync_interval_minutes || 30)}"></label>
+          <p class="integration-help">History availability depends on WhatsApp and the linked device. Sync is incremental and bounded; it cannot guarantee every old or new message is available. Retrieved records keep source details where WhatsApp provides them.</p>
+          <label class="settings-row"><span class="settings-label">Allow outbound messages</span><input id="uf-connector-write" type="checkbox"${defaultWriteEnabled ? ' checked' : ''}></label>
+          <p class="integration-help">Off by default. When enabled, an explicit send can send a message and scheduled send tasks may send on every run. Each scheduled send requires its own confirmation; no messages are sent during setup.</p>
+          <label class="settings-row"><span class="settings-label">Confirm outbound permission</span><input id="uf-connector-write-ack" type="checkbox"${writeAck ? ' checked' : ''} ${defaultWriteEnabled ? '' : 'disabled'}></label>
+        ` : ''}
+        ${isMoodle ? `
+          <label class="settings-row"><span class="settings-label">Semantic indexing (optional)</span><input id="uf-connector-semantic" type="checkbox"${indexChecked ? ' checked' : ''}></label>
+          <label class="settings-row"><span class="settings-label">Automatic course sync</span><input id="uf-connector-auto" type="checkbox"${autoSyncChecked ? ' checked' : ''}></label>
+          <label class="settings-row"><span class="settings-label">Sync interval (minutes)</span><input id="uf-connector-interval" class="settings-input" type="number" min="5" max="1440" value="${Number(config.sync_interval_minutes || 30)}"></label>
+          <p class="integration-help">Indexing and automatic sync are optional. Course material availability follows your ETH enrollment and Moodle access; retrieval includes source details when available, not a guarantee that every course item is indexed. ${account ? `Index status: ${esc(account.index_status || (indexChecked ? 'Semantic indexing enabled; status updates after sync.' : 'Indexing off; keyword retrieval remains available.'))}${account.last_sync_at ? ` · Last sync ${esc(new Date(account.last_sync_at).toLocaleString())}` : ''}` : 'Choose these options now or later; nothing is indexed until enabled and synced.'}</p>
+        ` : ''}
+        <div id="uf-connector-setup-status" class="integration-setup-status" role="status" aria-live="polite">${esc(status)}</div>
+        <div id="uf-connector-actions" class="integration-setup-actions"></div>
+        <div id="uf-connector-output" class="integration-setup-status" role="status" aria-live="polite"></div>
+        <div class="integration-setup-actions">
+          <button type="button" class="admin-btn-add" id="uf-connector-save">${editId ? 'Save settings' : 'Add and continue'}</button>
+          ${editId ? `<button type="button" class="admin-btn-sm" id="uf-connector-start" aria-describedby="uf-connector-setup-status">${isMoodle ? 'Start ETH sign-in' : 'Prepare service and pair'}</button>` : ''}
+          <button type="button" class="admin-btn-sm" id="uf-connector-cancel">Cancel setup</button>
+        </div>
+      </div>`;
+
+    const output = el('uf-connector-output');
+    const statusEl = el('uf-connector-setup-status');
+    const methodSelect = el('uf-connector-method');
+    if (!isMoodle && account) methodSelect.disabled = true;
+    let currentSetupState = account?.setup_status || account?.status || 'setup_required';
+    const setStatus = (message, error = false) => {
+      statusEl.textContent = message || '';
+      statusEl.style.color = error ? 'var(--red)' : '';
+    };
+    const modeSections = () => {
+      const method = methodSelect?.value;
+      if (isMoodle) {
+        el('uf-moodle-api-guide').hidden = method !== 'token';
+        el('uf-moodle-token-row').hidden = method !== 'token';
+        el('uf-moodle-browser-login').hidden = method === 'token';
+        const callbackArea = el('uf-moodle-callback-area');
+        if (callbackArea) callbackArea.hidden = method !== 'normal_browser' || !account;
+        el('uf-moodle-remote-view').hidden = method !== 'remote';
+        const start = el('uf-connector-start');
+        if (start) start.hidden = method === 'token';
+      }
+      const write = el('uf-connector-write');
+      const acknowledgement = el('uf-connector-write-ack');
+      if (write && acknowledgement) {
+        acknowledgement.disabled = !write.checked;
+        if (!write.checked) acknowledgement.checked = false;
+      }
+    };
+    methodSelect?.addEventListener('change', modeSections);
+    el('uf-connector-write')?.addEventListener('change', modeSections);
+    modeSections();
+
+    const renderMoodleView = async view => {
+      const host = el('uf-moodle-remote-view');
+      if (!host) return;
+      host.replaceChildren();
+      const viewUrl = safeHttpsUrl(view?.url);
+      const header = document.createElement('p');
+      header.className = 'integration-help';
+      header.textContent = `${view?.title || 'ETH sign-in'}${viewUrl ? ` · ${viewUrl}` : ''}`;
+      host.appendChild(header);
+      const screenshot = safeRasterDataUrl(view?.screenshot_data_url);
+      if (screenshot) {
+        const image = document.createElement('img');
+        image.className = 'integration-remote-screenshot';
+        image.src = screenshot;
+        image.alt = `Current ETH Moodle sign-in page${view?.title ? `: ${view.title}` : ''}`;
+        host.appendChild(image);
+      }
+      if (view?.message) {
+        const message = document.createElement('p');
+        message.className = 'integration-help';
+        message.textContent = view.message;
+        host.appendChild(message);
+      }
+      const controls = Array.isArray(view?.controls) ? view.controls : [];
+      const allowedActions = new Set(Array.isArray(view?.actions) ? view.actions : []);
+      const actionRequest = async (action, controlId, input, control) => {
+        if (!allowedActions.has(action)) return;
+        const sensitive = input?.type === 'password';
+        const value = input ? remoteFieldValue(input) : '';
+        const controller = new AbortController();
+        activeSetupRequest = controller;
+        const buttons = [...host.querySelectorAll('button')];
+        try {
+          if (sensitive && !isVerifiedEthPasswordControl(view?.url, control)) {
+            setStatus(`Password fill is blocked for this unverified origin (${control?.origin || 'unknown'}). Check the displayed HTTPS address; use the normal-browser sign-in link if needed.`, true);
+            return;
+          }
+          if (sensitive && !input._credentialConsent?.checked) {
+            setStatus('Confirm the one-time HTTPS credential disclosure before filling a password.', true);
+            input._credentialConsent?.focus();
+            return;
+          }
+          buttons.forEach(button => { button.disabled = true; });
+          setStatus(sensitive
+            ? 'Sending this password only for the current HTTPS field fill…'
+            : 'Updating ETH sign-in…');
+          const result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, control_id: controlId, value }),
+            signal: controller.signal,
+          });
+          setStatus(result.message || 'ETH sign-in page updated. Continue sign-in or MFA yourself.');
+          if (result.controls || result.screenshot_data_url || result.url) await renderMoodleView(result.view || result);
+          else await refreshMoodleView();
+        } catch (error) {
+          if (!controller.signal.aborted) setStatus(error.message || 'Could not update the sign-in page.', true);
+        } finally {
+          if (sensitive) {
+            input.value = '';
+            if (input._credentialConsent) input._credentialConsent.checked = false;
+          }
+          if (activeSetupRequest === controller) activeSetupRequest = null;
+          buttons.forEach(button => { if (button.isConnected) button.disabled = false; });
+        }
+      };
+      for (const control of controls) {
+        if (!control || control.disabled || !control.id || !control.label) continue;
+        const tag = String(control.tag || '').toLowerCase();
+        const typeValue = String(control.type || '').toLowerCase();
+        if (tag === 'button' || typeValue === 'button' || typeValue === 'submit' || tag === 'a') {
+          if (!allowedActions.has('click')) continue;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'admin-btn-sm';
+          button.textContent = control.label;
+          button.addEventListener('click', () => actionRequest('click', String(control.id), null, control));
+          host.appendChild(button);
+          continue;
+        }
+        if (!allowedActions.has('fill')) continue;
+        const fieldLabel = document.createElement('label');
+        fieldLabel.className = 'settings-row';
+        const labelText = document.createElement('span');
+        labelText.className = 'settings-label';
+        labelText.textContent = control.label;
+        const input = createRemoteField(control);
+        fieldLabel.append(labelText, input);
+        host.appendChild(fieldLabel);
+        if (input.type === 'password') {
+          const disclosure = document.createElement('p');
+          disclosure.className = 'integration-help';
+          const verifiedOrigin = isVerifiedEthPasswordControl(view?.url, control);
+          disclosure.textContent = `If you choose to fill this password from ${control.origin || 'an unverified origin'}, it is sent over HTTPS to Odysseus server memory for this single action and cleared immediately after the request. It is not saved as a connector credential. ${verifiedOrigin ? 'Complete MFA yourself.' : 'Password filling is blocked for this origin; use the normal-browser sign-in link or inspect the address before continuing.'}`;
+          const consentLabel = document.createElement('label');
+          consentLabel.className = 'settings-row';
+          const consent = document.createElement('input');
+          consent.type = 'checkbox';
+          consent.disabled = !verifiedOrigin;
+          consentLabel.append(consent, document.createTextNode('I understand this password is sent for one HTTPS field-fill request.'));
+          input._credentialConsent = consent;
+          host.append(disclosure, consentLabel);
+        }
+        const fillButton = document.createElement('button');
+        fillButton.type = 'button';
+        fillButton.className = 'admin-btn-sm';
+        fillButton.textContent = (input.type === 'checkbox' || input.type === 'radio' ? 'Apply ' : 'Fill ') + control.label;
+        fillButton.addEventListener('click', () => actionRequest('fill', String(control.id), input, control));
+        host.appendChild(fillButton);
+      }
+      const navActions = [
+        ['refresh', 'Refresh ETH page'],
+        ['back', 'Back'],
+        ['close', 'Close sign-in window'],
+      ];
+      for (const [action, label] of navActions) {
+        if (!allowedActions.has(action)) continue;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'admin-btn-sm';
+        button.textContent = label;
+        button.addEventListener('click', async () => {
+          try {
+            const result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/action`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action }),
+            });
+            await renderMoodleView(result.view || result);
+          } catch (error) { setStatus(error.message || 'Could not update the ETH sign-in page.', true); }
+        });
+        host.appendChild(button);
+      }
+    };
+
+    async function refreshMoodleView() {
+      if (!account || !isMoodle) return;
+      try {
+        const view = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/view`);
+        await renderMoodleView(view);
+      } catch (error) {
+        setStatus(error.message || 'ETH sign-in window is not ready. Start sign-in to try again.', true);
+      }
+    }
+
+    const renderWhatsappQr = async () => {
+      const pairing = el('uf-whatsapp-pairing');
+      const qrHost = el('uf-whatsapp-qr');
+      if (!account || !pairing || !qrHost) return;
+      pairing.hidden = false;
+      try {
+        const result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/whatsapp/pairing`);
+        qrHost.replaceChildren();
+        const qrData = safeRasterDataUrl(result.qr_data_url);
+        if (qrData) {
+          const image = document.createElement('img');
+          image.className = 'integration-qr';
+          image.src = qrData;
+          image.alt = 'Temporary WhatsApp device-pairing QR code';
+          qrHost.appendChild(image);
+          const expiry = document.createElement('p');
+          expiry.className = 'integration-help';
+          const expiresAt = result.expiresAt;
+          const expiryDate = expiresAt ? new Date(expiresAt) : null;
+          expiry.textContent = expiryDate && !Number.isNaN(expiryDate.getTime())
+            ? `QR code expires ${expiryDate.toLocaleTimeString()}. If it expires, retry pairing.`
+            : 'This QR code is temporary. If it expires, retry pairing.';
+          qrHost.appendChild(expiry);
+        } else {
+          qrHost.textContent = result.message || 'Waiting for a fresh pairing QR code…';
+        }
+      } catch (error) {
+        qrHost.textContent = error.message || 'The pairing code is not available yet. Retry setup.';
+      }
+    };
+
+    const renderSetupStatus = async data => {
+      const state = String(data?.state || data?.status || account?.status || 'setup_required');
+      const message = typeof data?.message === 'string' ? data.message : typeof data?.error?.message === 'string' ? data.error.message : typeof data?.error === 'string' ? data.error : '';
+      const errorCode = String(data?.error?.code || data?.code || '').toLowerCase();
+      const expired = isMoodle && (errorCode.includes('expired') || /session expired/i.test(message));
+      currentSetupState = state;
+      setConnectorWizardStep(formEl, state === 'connected' ? 4 : state === 'awaiting_login' || state === 'awaiting_qr' ? 3 : 2);
+      setStatus(expired ? 'Your Moodle sign-in session expired. Choose Reconnect ETH sign-in to start a fresh session.' : `${connectorSetupStateLabel(state)}${message ? ` · ${message}` : ''}`, state === 'error' || state === 'setup_required');
+      const startButton = el('uf-connector-start');
+      if (startButton) {
+        startButton.dataset.retryable = data?.retryable ? '1' : '';
+        startButton.disabled = ['starting', 'awaiting_login', 'awaiting_qr'].includes(state);
+        startButton.textContent = expired
+          ? 'Reconnect ETH sign-in'
+          : state === 'connected'
+            ? (isMoodle ? 'Reconnect Moodle' : 'Pair another device')
+            : data?.retryable ? 'Retry setup' : isMoodle ? 'Start ETH sign-in' : 'Prepare service and pair';
+      }
+      if (!isMoodle && state === 'awaiting_qr') await renderWhatsappQr();
+      if (!isMoodle && state !== 'awaiting_qr') {
+        el('uf-whatsapp-pairing').hidden = true;
+        el('uf-whatsapp-qr').replaceChildren();
+      }
+      if (state === 'connected' && data?.account) {
+        const info = data.account;
+        const detail = [info.display_name, info.phone_number, info.phone, info.label].filter(Boolean).join(' · ');
+        if (detail) setStatus(`Connected${detail ? ` · ${detail}` : ''}`);
+        const qr = el('uf-whatsapp-pairing');
+        if (qr) qr.hidden = true;
+      }
+      if (state === 'connected') setConnectorWizardStep(formEl, 4);
+      return state;
+    };
+
+    const pollSetupStatus = async initial => {
+      cleanupSetupPolling();
+      const controller = new AbortController();
+      activeSetupPoll = controller;
+      const startedAt = Date.now();
+      let attempts = 0;
+      const poll = async () => {
+        if (controller.signal.aborted || !formEl.isConnected || formEl.style.display === 'none') return;
+        attempts += 1;
+        try {
+          const data = initial && attempts === 1
+            ? initial
+            : await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/status`, { signal: controller.signal });
+          const state = await renderSetupStatus(data);
+          if (controller.signal.aborted) return;
+          if (['connected', 'error', 'setup_required', 'stopped'].includes(state)) {
+            cleanupSetupPolling();
+            await renderList();
+            return;
+          }
+          if (attempts >= 36 || Date.now() - startedAt >= 240000) {
+            setStatus('Setup is still running. Automatic checks paused; use “Refresh status” to check again.');
+            cleanupSetupPolling();
+            return;
+          }
+          setupPollTimer = setTimeout(poll, Math.min(8000, 700 * (2 ** Math.min(attempts - 1, 4))));
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (attempts >= 36 || Date.now() - startedAt >= 240000) {
+            setStatus(`${error.message || 'Could not check setup status.'} Automatic checks paused; retry when ready.`, true);
+            cleanupSetupPolling();
+            return;
+          }
+          setupPollTimer = setTimeout(poll, Math.min(8000, 700 * (2 ** Math.min(attempts - 1, 4))));
+        }
+      };
+      await poll();
+    };
+
+    const startSetup = async () => {
+      if (!account?.id) return;
+      if (isMoodle && methodSelect.value === 'token') return;
+      cleanupSetupPolling();
+      currentSetupState = 'starting';
+      setConnectorWizardStep(formEl, 2);
+      setStatus(isMoodle ? 'Preparing ETH sign-in…' : 'Preparing the WhatsApp service…');
+      const startButton = el('uf-connector-start');
+      if (startButton) startButton.disabled = true;
+      const requestController = new AbortController();
+      activeSetupRequest = requestController;
+      try {
+        const method = methodSelect?.value;
+        const retry = startButton?.dataset.retryable === '1';
+        const endpoint = retry ? 'retry' : 'start';
+        const data = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(isMoodle ? { method } : {}),
+          signal: requestController.signal,
+        });
+        const handoff = data.handoff;
+        if (isMoodle && method === 'normal_browser') {
+          const callbackArea = el('uf-moodle-callback-area');
+          if (callbackArea) callbackArea.hidden = false;
+          const url = safeMoodleLaunchUrl(handoff?.launch_url);
+          if (url) {
+            const host = el('uf-moodle-browser-login');
+            let openLink = host.querySelector('[data-moodle-handoff-link]');
+            if (!openLink) {
+              openLink = document.createElement('a');
+              openLink.dataset.moodleHandoffLink = '1';
+              openLink.target = '_blank';
+              openLink.rel = 'noopener noreferrer';
+              openLink.textContent = 'Open the secure ETH sign-in handoff';
+              host.appendChild(openLink);
+            }
+            openLink.href = url;
+          }
+          const handoffMessage = typeof handoff?.message === 'string' && handoff.message.trim()
+            ? handoff.message.trim()
+            : 'Secure handoff ready. Finish ETH sign-in, then paste the one-time callback link here.';
+          const expiryMessage = Number(handoff?.expires_in) > 0
+            ? `This handoff expires in ${Number(handoff.expires_in)} seconds.`
+            : '';
+          const handoffMessageEl = el('uf-moodle-handoff-message');
+          if (handoffMessageEl) {
+            handoffMessageEl.textContent = [handoffMessage, expiryMessage].filter(Boolean).join(' ');
+            handoffMessageEl.hidden = false;
+          }
+          setStatus(handoffMessage);
+        }
+        if (isMoodle && method === 'remote') await refreshMoodleView();
+        await pollSetupStatus(data);
+      } catch (error) {
+        if (!requestController.signal.aborted) {
+          currentSetupState = 'error';
+          setStatus(error.message || 'Could not start setup.', true);
+        }
+      } finally {
+        if (activeSetupRequest === requestController) activeSetupRequest = null;
+        if (startButton?.isConnected) startButton.disabled = ['starting', 'awaiting_login', 'awaiting_qr'].includes(currentSetupState);
+      }
+    };
+
+    el('uf-connector-start')?.addEventListener('click', startSetup);
+    el('uf-moodle-finish-handoff')?.addEventListener('click', async () => {
+      const input = el('uf-moodle-callback');
+      const callback = input.value.trim();
+      if (!callback) return setStatus('Paste the one-time Moodle callback link to finish sign-in.', true);
+      try {
+        setStatus('Verifying the one-time Moodle handoff…');
+        const result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/callback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callback }),
+        });
+        await renderSetupStatus(result);
+        await pollSetupStatus(result);
+      } catch (error) {
+        setStatus(error.message || 'Could not verify the Moodle callback. Start a fresh sign-in if it expired.', true);
+      } finally {
+        input.value = '';
+      }
+    });
+    el('uf-connector-cancel')?.addEventListener('click', async event => {
+      const cancelButton = event.currentTarget;
+      cancelButton.disabled = true;
+      const state = currentSetupState;
+      cleanupSetupPolling();
+      if (account?.id && ['starting', 'awaiting_login', 'awaiting_qr'].includes(state)) {
+        try {
+          await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/stop`, { method: 'POST' });
+        } catch (error) {
+          setStatus(`Could not stop setup cleanly: ${error.message || 'retry from this account.'}`, true);
+          cancelButton.disabled = false;
+          return;
+        }
+      }
+      cleanupSetupPolling();
+      formEl.style.display = 'none';
+      formEl.replaceChildren();
+    });
+
+    el('uf-connector-save').addEventListener('click', async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      const secretInput = el('uf-connector-secret');
+      try {
+        const name = el('uf-connector-name').value.trim();
+        if (!name) throw new Error('Enter a name for this account.');
+        const method = methodSelect?.value || methodDefault;
+        const secret = secretInput && !secretInput.closest('[hidden]') ? secretInput.value.trim() : '';
+        if (isMoodle && method === 'token' && !secret && (!account?.has_credentials || config.auth_mode !== 'token')) throw new Error('Paste an authorized Moodle web-service token or choose Sign in with ETH.');
+        if (!isMoodle && method === 'external' && !supportsExternal) {
+          throw new Error('This deployment has not reported external bridge support. Choose Managed by Odysseus or refresh setup information.');
+        }
+        const semanticIndex = !!el('uf-connector-semantic')?.checked;
+        const autoSync = !!el('uf-connector-auto')?.checked;
+        const interval = Number(el('uf-connector-interval')?.value || 30);
+        const outboundToggle = el('uf-connector-write');
+        const outboundAcknowledgement = el('uf-connector-write-ack');
+        if (!isMoodle && outboundToggle?.checked && !outboundAcknowledgement?.checked) {
+          throw new Error('Confirm outbound permission before saving. Scheduled sends still require their own acknowledgement each run.');
+        }
+        const writeEnabled = !isMoodle && !!outboundToggle?.checked && !!outboundAcknowledgement?.checked;
+        const nextConfig = {
+          ...(config || {}),
+          ...(isMoodle ? { auth_mode: method === 'token' ? 'token' : method === 'normal_browser' ? 'normal_browser' : 'browser' } : { mode: method }),
+          semantic_index: semanticIndex,
+          auto_sync: autoSync,
+          sync_interval_minutes: interval,
+        };
+        const credentials = secret ? { [isMoodle ? 'moodle_token' : 'api_key']: secret } : {};
+        const body = {
+          name,
+          config: nextConfig,
+          semantic_index: semanticIndex,
+          auto_sync: autoSync,
+          sync_interval_minutes: interval,
+          ...(!isMoodle && method === 'managed' ? { write_enabled: writeEnabled } : {}),
+        };
+        let result;
+        if (editId) {
+          if (secret || (isMoodle && method !== 'token' && config.auth_mode === 'token')) body.credentials = credentials;
+          result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(editId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          account = result.account || account;
+          config = account.config || config;
+          const sendButton = el('uf-connector-actions')?.querySelector('[data-write-enabled]');
+          if (sendButton) {
+            const canSend = account.write_enabled === true;
+            sendButton.dataset.writeEnabled = canSend ? 'true' : 'false';
+            sendButton.disabled = !canSend;
+            sendButton.title = canSend ? 'Send one message after confirmation' : 'Enable outbound messages above and save to send';
+          }
+          showConnectorOutput(output, 'Settings saved.');
+          setConnectorWizardStep(formEl, account?.status === 'connected' ? 4 : 2);
+          if (isMoodle && method === 'token') {
+            setStatus('Token saved securely. Verifying Moodle access…');
+            await pollSetupStatus(await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/status`));
+          }
+          await renderList();
+          notifyIntegrationsChanged();
+        } else {
+          result = await connectorRequest('/api/connectors/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: type, ...body, credentials }),
+          });
+          const newId = result.account?.id || result.id;
+          if (!newId) throw new Error('The account was created, but the server did not return its account ID. Refresh the account list to continue.');
+          await renderList();
+          await showGuidedConnectorForm(type, newId, method, true);
+        }
+      } catch (error) {
+        showConnectorOutput(output, error.message || 'Could not save account settings.', true);
+      } finally {
+        if (secretInput) secretInput.value = '';
+        button.disabled = false;
+      }
+    });
+
+    if (account) {
+      await renderConnectorActions(type, account);
+      const startButton = el('uf-connector-start');
+      const syncButton = document.createElement('button');
+      syncButton.type = 'button';
+      syncButton.className = 'admin-btn-sm';
+      syncButton.textContent = isMoodle ? 'Sync courses and files' : 'Sync available history now';
+      syncButton.addEventListener('click', async () => {
+        syncButton.disabled = true;
+        try {
+          const result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/sync${isMoodle ? '' : '?max_pages=200'}`, { method: 'POST' });
+          const summary = result.message || result.summary || (typeof result.records === 'number' ? `Sync complete: ${result.records} records processed.` : 'Sync request completed. Check account status for indexing progress.');
+          showConnectorOutput(output, summary);
+          await renderList();
+        } catch (error) { showConnectorOutput(output, error.message || 'Sync failed.', true); }
+        finally { syncButton.disabled = false; }
+      });
+      el('uf-connector-actions')?.appendChild(syncButton);
+      const refreshButton = document.createElement('button');
+      refreshButton.type = 'button';
+      refreshButton.className = 'admin-btn-sm';
+      refreshButton.textContent = 'Refresh status';
+      refreshButton.addEventListener('click', async () => {
+        try {
+          const data = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/status`);
+          await renderSetupStatus(data);
+          if (!['connected', 'error', 'setup_required', 'stopped'].includes(data.state || data.status)) await pollSetupStatus(data);
+        } catch (error) { setStatus(error.message || 'Could not refresh status.', true); }
+      });
+      el('uf-connector-actions')?.appendChild(refreshButton);
+      const stopButton = document.createElement('button');
+      stopButton.type = 'button';
+      stopButton.className = 'admin-btn-sm';
+      stopButton.textContent = 'Stop setup';
+      stopButton.addEventListener('click', async () => {
+        cleanupSetupPolling();
+        stopButton.disabled = true;
+        try {
+          const result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/stop`, { method: 'POST' });
+          currentSetupState = 'stopped';
+          setStatus(result.message || connectorSetupStateLabel(result.state || result.status || 'stopped'));
+          if (!isMoodle) el('uf-whatsapp-pairing').hidden = true;
+        } catch (error) { setStatus(error.message || 'Could not stop setup.', true); }
+        finally { stopButton.disabled = false; }
+      });
+      el('uf-connector-actions')?.appendChild(stopButton);
+      if (isMoodle && methodDefault === 'remote') {
+        const state = account.setup_status || account.status;
+        if (state === 'awaiting_login') await refreshMoodleView();
+      }
+      if (!isMoodle && (account.setup_status || account.status) === 'awaiting_qr') await renderWhatsappQr();
+      setConnectorWizardStep(formEl, account.status === 'connected' ? 4 : 2);
+      if (autoStart) {
+        if (isMoodle && methodDefault === 'token') {
+          setStatus('Token saved securely. Verifying Moodle access…');
+          await pollSetupStatus(await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(account.id)}/setup/status`));
+        } else {
+          await startSetup();
+        }
+      } else if (['starting', 'awaiting_login', 'awaiting_qr'].includes(currentSetupState)) {
+        await pollSetupStatus();
+      }
+    }
+  }
   async function showPersonalConnectorForm(type, editId) {
+    if (type === 'moodle' || type === 'whatsapp') return showGuidedConnectorForm(type, editId);
     const labels = {
-      moodle: { title: 'ETH Moodle', key: 'moodle_token', label: 'Authorized Moodle web-service token' },
-      whatsapp: { title: 'WhatsApp', key: '', label: '' },
       maps: { title: 'Maps', key: 'api_key', label: 'OpenRouteService API key' },
       browser: { title: 'Browser Session', key: '', label: '' },
     };
@@ -3455,67 +4401,66 @@ async function initUnifiedIntegrations() {
         const data = await connectorRequest('/api/connectors/accounts');
         account = (data.accounts || []).find(item => item.id === editId) || null;
       } catch (err) {
-        formEl.innerHTML = `<div class="admin-card" style="margin-top:8px">${esc(err.message)}</div>`;
+        formEl.innerHTML = `<div class="admin-card" role="alert" style="margin-top:8px">${esc(err.message)}</div>`;
         return;
       }
     }
     if (editId && !account) {
-      formEl.innerHTML = '<div class="admin-card" style="margin-top:8px">Connector account not found.</div>';
+      formEl.innerHTML = '<div class="admin-card" role="alert" style="margin-top:8px">Connector account not found.</div>';
       return;
     }
-    const maps = type === 'maps';
-    const whatsapp = type === 'whatsapp';
     const browser = type === 'browser';
-    const syncable = ['moodle', 'whatsapp'].includes(type);
     const credentialLabel = spec.label;
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
         <h2 style="font-size:13px">${editId ? `Edit ${spec.title}` : `Add ${spec.title}`}</h2>
-        ${whatsapp ? '<p style="font-size:11px;opacity:.7">Requires the separately configured private WhatsApp bridge. Pair by scanning its QR code; do not enter WhatsApp credentials here. Message sends stay disabled unless WHATSAPP_ENABLE_WRITES=true in both the app and bridge environments.</p>' : ''}
-        ${type === 'moodle' ? '<p style="font-size:11px;opacity:.7">Use an authorized Moodle web-service token, or start ETH Shibboleth/MFA login, inspect the page, and explicitly fill or click its sign-in controls here. Password values pass transiently through the Odysseus backend for one HTTPS field fill; they are not saved as connector credentials. Complete MFA yourself.</p>' : ''}
-        ${browser ? '<p style="font-size:11px;opacity:.7">Creates an owner-isolated Playwright profile. Use explicit Settings controls to sign in; password values pass transiently through the Odysseus backend for one HTTPS field fill and are not saved as connector credentials. Session cookies are encrypted for your account. Private-network targets and purchase/cart/checkout/payment actions are blocked.</p>' : ''}
-        <label class="settings-row"><span class="settings-label">Name</span><input id="uf-connector-name" class="settings-input" maxlength="120" value="${esc(account?.name || spec.title)}"></label>
-        ${credentialLabel ? `<label class="settings-row"><span class="settings-label">${esc(credentialLabel)}</span><input id="uf-connector-secret" class="settings-input" type="password" autocomplete="new-password" placeholder="${editId ? 'Leave blank to keep the saved secret' : 'Required for API access'}"></label>` : ''}
-        ${syncable ? `<label class="settings-row"><span class="settings-label">Semantic indexing</span><input id="uf-connector-semantic" type="checkbox" ${account?.config?.semantic_index ? 'checked' : ''}></label>
-        <label class="settings-row"><span class="settings-label">Sync interval (minutes)</span><input id="uf-connector-interval" class="settings-input" type="number" min="5" max="1440" value="${Number(account?.config?.sync_interval_minutes || 30)}"></label>` : ''}
-        ${syncable ? `<label class="settings-row"><span class="settings-label">Automatic sync</span><input id="uf-connector-auto" type="checkbox" ${account?.config?.auto_sync ? 'checked' : ''}></label>` : ''}
-        ${account ? '<div id="uf-connector-actions" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px"></div>' : ''}
-        <div id="uf-connector-output" style="white-space:pre-wrap;font:11px monospace;max-height:220px;overflow:auto;margin-top:8px"></div>
-        <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:8px">
-          <button type="button" class="admin-btn-add" id="uf-connector-save">${editId ? 'Save' : 'Add'}</button>
+        ${browser ? '<p class="integration-help">Creates an owner-isolated browser profile. Use the visible, service-provided page labels and buttons below to sign in yourself—no CSS selectors. Passwords are sent transiently for a single HTTPS field fill and cleared immediately; they are never saved as connector credentials. Your local password-manager extension may not be available inside this isolated profile. Session cookies are encrypted for your account. Private-network targets and purchase/cart/checkout/payment actions are blocked.</p>' : `<div class="integration-help"><strong>Maps setup · OpenRouteService</strong><p>Maps provides geocoding and directions. It needs an OpenRouteService API key; the key is stored encrypted and never redisplayed.</p><ol><li><a href="https://openrouteservice.org/dev/#/signup" target="_blank" rel="noopener noreferrer">Create an OpenRouteService account</a> and verify your email.</li><li>Open the dashboard’s API keys page and create or copy an API key with geocoding and directions access.</li><li>Paste it below, save, then test with a place name using “Find place”. A successful API response changes status to Connected.</li></ol><a href="https://openrouteservice.org/dev/#/home" target="_blank" rel="noopener noreferrer">OpenRouteService developer dashboard</a>${account ? `<p>Setup status: ${esc(account.setup_status || account.status || 'not verified')}.</p>` : ''}</div>`}
+        <label class="settings-row"><span class="settings-label">Name</span><input id="uf-connector-name" class="settings-input" maxlength="120" value="${esc(account?.name || spec.title)}" autocomplete="off"></label>
+        ${credentialLabel ? `<label class="settings-row"><span class="settings-label">${esc(credentialLabel)}</span><input id="uf-connector-secret" class="settings-input" type="password" autocomplete="new-password" spellcheck="false" placeholder="${editId ? 'Leave blank to keep the saved key' : 'Paste API key; hidden after saving'}"></label>` : ''}
+        ${account ? '<div id="uf-connector-actions" class="integration-setup-actions"></div>' : ''}
+        <div id="uf-connector-output" class="integration-setup-status" role="status" aria-live="polite"></div>
+        <div class="integration-setup-actions">
+          <button type="button" class="admin-btn-add" id="uf-connector-save">${editId ? 'Save' : 'Add and continue'}</button>
         </div>
       </div>`;
     const output = el('uf-connector-output');
-    el('uf-connector-save').addEventListener('click', async () => {
+    el('uf-connector-save').addEventListener('click', async event => {
+      const button = event.currentTarget;
+      const secretInput = el('uf-connector-secret');
+      button.disabled = true;
       try {
         const name = el('uf-connector-name').value.trim();
-        if (!name) throw new Error('Name is required.');
-        const secret = credentialLabel ? el('uf-connector-secret').value.trim() : '';
-        if (!editId && credentialLabel && type === 'maps' && !secret) throw new Error('An OpenRouteService API key is required.');
+        if (!name) throw new Error('Enter a name for this account.');
+        const secret = credentialLabel ? secretInput.value.trim() : '';
+        if (!editId && type === 'maps' && !secret) throw new Error('Paste your OpenRouteService API key, or close this form and choose Browser Session instead.');
         const credentials = secret ? { [spec.key]: secret } : {};
         const options = { headers: { 'Content-Type': 'application/json' } };
         let result;
         if (editId) {
-          const body = { name };
-          if (syncable) {
-            body.auto_sync = el('uf-connector-auto').checked;
-            body.sync_interval_minutes = Number(el('uf-connector-interval').value);
-            body.semantic_index = el('uf-connector-semantic').checked;
-          }
-          if (secret) body.credentials = credentials;
           result = await connectorRequest(`/api/connectors/accounts/${encodeURIComponent(editId)}`, {
-            ...options, method: 'PATCH', body: JSON.stringify(body),
+            ...options,
+            method: 'PATCH',
+            body: JSON.stringify({ name, ...(secret ? { credentials } : {}) }),
           });
+          showConnectorOutput(output, type === 'maps' ? 'Maps settings saved. Use “Find place” to verify the key.' : 'Browser Session settings saved.');
         } else {
           result = await connectorRequest('/api/connectors/accounts', {
-            ...options, method: 'POST',
-            body: JSON.stringify({ provider: type, name, credentials, auto_sync: syncable && el('uf-connector-auto').checked }),
+            ...options,
+            method: 'POST',
+            body: JSON.stringify({ provider: type, name, credentials }),
           });
-          showConnectorOutput(output, 'Connector added. Open its card to configure account actions.');
+          const newId = result.account?.id || result.id;
+          if (!newId) throw new Error('The account was created, but no account ID was returned. Refresh the account list to continue.');
+          await renderList();
+          await showPersonalConnectorForm(type, newId);
+          return;
         }
         await renderList();
-        if (result.account?.id && !editId) showForm(type, result.account.id);
-      } catch (err) { showConnectorOutput(output, err.message, true); }
+      } catch (err) { showConnectorOutput(output, err.message || 'Could not save account.', true); }
+      finally {
+        if (secretInput) secretInput.value = '';
+        if (button.isConnected) button.disabled = false;
+      }
     });
     if (account) await renderConnectorActions(type, account);
   }
@@ -3541,151 +4486,204 @@ async function initUnifiedIntegrations() {
     const browserAction = body => connectorRequest(`/api/connectors/accounts/${id}/browser/action`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
-    const moodleBrowserAction = body => connectorRequest(`/api/connectors/accounts/${id}/moodle/browser/action`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
     if (type === 'browser') {
+      const addressLabel = document.createElement('label');
+      addressLabel.className = 'settings-row';
+      const addressLabelText = document.createElement('span');
+      addressLabelText.className = 'settings-label';
+      addressLabelText.textContent = 'Public website';
       const address = document.createElement('input');
-      address.className = 'settings-input';
-      address.placeholder = 'Public URL (https://...)';
-      address.setAttribute('aria-label', 'Browser URL');
       address.type = 'url';
-      const selector = document.createElement('input');
-      selector.className = 'settings-input';
-      selector.placeholder = 'CSS selector';
-      selector.setAttribute('aria-label', 'Browser CSS selector');
-      const value = document.createElement('input');
-      value.className = 'settings-input';
-      value.placeholder = 'Field value (entered by you)';
-      value.setAttribute('aria-label', 'Browser field value');
-      const valueType = document.createElement('select');
-      valueType.className = 'settings-input';
-      valueType.setAttribute('aria-label', 'Browser field value type');
-      valueType.add(new Option('Text field', 'text'));
-      valueType.add(new Option('Password field (user only)', 'password'));
-      valueType.addEventListener('change', () => { value.type = valueType.value; });
-      value.addEventListener('input', () => { if (valueType.value === 'password') value.type = 'password'; });
-      const key = document.createElement('select');
-      key.className = 'settings-input';
-      key.setAttribute('aria-label', 'Browser key');
-      ['Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Space']
-        .forEach(item => key.add(new Option(item, item)));
-      actions.append(address, selector, valueType, value, key);
-      actionButton('Start session', async () => showConnectorOutput(output, await browserAction({ action: 'start' })));
-      actionButton('Session status', async () => showConnectorOutput(output, await browserAction({ action: 'status' })));
-      actionButton('Navigate', async () => {
-        const target = address.value.trim();
-        if (!target) throw new Error('Enter a public HTTP or HTTPS URL.');
-        showConnectorOutput(output, await browserAction({ action: 'navigate', url: target }));
-      });
-      actionButton('Read page', async () => showConnectorOutput(output, await browserAction({ action: 'snapshot' })));
-      actionButton('Click selector', async () => {
-        if (!selector.value.trim()) throw new Error('Enter a CSS selector.');
-        showConnectorOutput(output, await browserAction({ action: 'click', selector: selector.value.trim() }));
-      });
-      actionButton('Fill selector', async () => {
-        if (!selector.value.trim()) throw new Error('Enter a CSS selector.');
-        const fieldValue = value.value;
+      address.className = 'settings-input';
+      address.placeholder = 'https://example.com';
+      address.autocomplete = 'url';
+      addressLabel.append(addressLabelText, address);
+      const viewHost = document.createElement('div');
+      viewHost.className = 'integration-help';
+      viewHost.setAttribute('aria-label', 'Browser page and sign-in controls');
+      const stateNode = document.createElement('p');
+      stateNode.className = 'integration-setup-status';
+      stateNode.setAttribute('role', 'status');
+      stateNode.setAttribute('aria-live', 'polite');
+      stateNode.textContent = account.status === 'connected' ? 'Browser profile active; this does not mean you are signed in to a merchant.' : 'Start the browser profile, then navigate to a public HTTPS page.';
+      const publicUrl = raw => {
         try {
-          showConnectorOutput(output, await browserAction({ action: 'fill', selector: selector.value.trim(), value: fieldValue }));
-        } finally {
-          value.value = '';
+          const parsed = new URL(String(raw || ''));
+          return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+        } catch (_) { return ''; }
+      };
+      const renderBrowserView = async view => {
+        viewHost.replaceChildren();
+        const pageUrl = publicUrl(view.url);
+        const title = document.createElement('p');
+        title.textContent = `${view.title || 'Current browser page'}${pageUrl ? ` · ${pageUrl}` : ''}`;
+        viewHost.appendChild(title);
+        if (view.message) {
+          const message = document.createElement('p');
+          message.className = 'integration-help';
+          message.textContent = view.message;
+          viewHost.appendChild(message);
         }
-      });
-      actionButton('Press key', async () => showConnectorOutput(output, await browserAction({ action: 'press', key: key.value })));
-      actionButton('Back', async () => showConnectorOutput(output, await browserAction({ action: 'back' })));
-      actionButton('Download current URL', async () => {
-        const target = address.value.trim();
-        if (!target) throw new Error('Enter a public file URL.');
-        const link = document.createElement('a');
-        link.href = `/api/connectors/accounts/${id}/browser/download?url=${encodeURIComponent(target)}`;
-        link.download = '';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-      });
-      actionButton('Close session', async () => showConnectorOutput(output, await browserAction({ action: 'close' })));
-    } else if (type === 'moodle') {
-      const selector = document.createElement('input');
-      selector.className = 'settings-input';
-      selector.placeholder = 'CSS selector for one Moodle control';
-      selector.setAttribute('aria-label', 'Moodle browser CSS selector');
-      const fieldValue = document.createElement('input');
-      fieldValue.className = 'settings-input';
-      fieldValue.placeholder = 'Value entered by you (cleared after action)';
-      fieldValue.setAttribute('aria-label', 'Moodle browser field value');
-      const valueType = document.createElement('select');
-      valueType.className = 'settings-input';
-      valueType.setAttribute('aria-label', 'Moodle browser field value type');
-      valueType.add(new Option('Text field', 'text'));
-      valueType.add(new Option('Password field (HTTPS only)', 'password'));
-      valueType.addEventListener('change', () => { fieldValue.type = valueType.value; });
-      fieldValue.addEventListener('input', () => {
-        if (valueType.value === 'password') fieldValue.type = 'password';
-      });
-      actions.append(selector, valueType, fieldValue);
-      actionButton('Start ETH login', async () => showConnectorOutput(output, await connectorRequest(`/api/connectors/accounts/${id}/moodle/browser-login`, { method: 'POST' })));
-      actionButton('Read login page', async () => showConnectorOutput(output, await moodleBrowserAction({ action: 'snapshot' })));
-      actionButton('Fill selected field', async () => {
-        if (!selector.value.trim()) throw new Error('Enter one CSS selector from the login page controls.');
-        const entered = fieldValue.value;
-        try {
-          showConnectorOutput(output, await moodleBrowserAction({
-            action: 'fill', selector: selector.value.trim(), value: entered,
-          }));
-        } finally {
-          fieldValue.value = '';
+        const screenshot = safeRasterDataUrl(view.screenshot_data_url);
+        if (screenshot) {
+          const image = document.createElement('img');
+          image.className = 'integration-remote-screenshot';
+          image.src = screenshot;
+          image.alt = `Current browser page${view.title ? `: ${view.title}` : ''}`;
+          viewHost.appendChild(image);
         }
-      });
-      actionButton('Click selected control', async () => {
-        if (!selector.value.trim()) throw new Error('Enter one CSS selector from the login page controls.');
-        showConnectorOutput(output, await moodleBrowserAction({
-          action: 'click', selector: selector.value.trim(),
-        }));
-      });
-      actionButton('Back', async () => showConnectorOutput(output, await moodleBrowserAction({ action: 'back' })));
-      actionButton('Close ETH session', async () => showConnectorOutput(output, await moodleBrowserAction({ action: 'close' })));
-      actionButton('Courses', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/moodle/courses`)));
-      actionButton('Calendar', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/moodle/calendar`)));
-      const courseId = document.createElement('input');
-      courseId.className = 'settings-input';
-      courseId.placeholder = 'Enrolled Moodle course ID';
-      courseId.setAttribute('aria-label', 'Moodle course ID');
-      courseId.maxLength = 32;
-      const contents = document.createElement('button');
-      contents.type = 'button'; contents.className = 'admin-btn-add'; contents.textContent = 'Read course contents';
-      contents.addEventListener('click', async () => {
+        const controls = Array.isArray(view.controls) ? view.controls : [];
+        const allowedActions = new Set(Array.isArray(view.actions) ? view.actions : []);
+        const perform = async (action, controlId, input) => {
+          if (!allowedActions.has(action)) return;
+          const sensitive = input?.type === 'password';
+          const value = input ? remoteFieldValue(input) : '';
+          const controller = new AbortController();
+          activeSetupRequest = controller;
+          try {
+            if (action === 'fill' && (!pageUrl || !pageUrl.startsWith('https://'))) {
+              showConnectorOutput(stateNode, 'Form fields can only be filled on a verified HTTPS page.', true);
+              return;
+            }
+            if (action === 'fill' && sensitive && !input._credentialConsent?.checked) {
+              showConnectorOutput(stateNode, 'Confirm the one-time HTTPS credential disclosure before filling a password.', true);
+              input._credentialConsent?.focus();
+              return;
+            }
+            stateNode.textContent = sensitive
+              ? 'Sending this password only for the current HTTPS field fill…'
+              : 'Updating the browser page…';
+            const result = await connectorRequest(`/api/connectors/accounts/${id}/setup/action`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action, control_id: controlId, value }),
+              signal: controller.signal,
+            });
+            showConnectorOutput(stateNode, result.message || 'Page updated. Continue sign-in or MFA yourself.');
+            if (result.view || result.controls || result.screenshot_data_url) await renderBrowserView(result.view || result);
+            else await refreshBrowserView();
+          } catch (error) {
+            if (!controller.signal.aborted) showConnectorOutput(stateNode, error.message || 'Could not update the browser page.', true);
+          } finally {
+            if (sensitive) {
+              input.value = '';
+              if (input._credentialConsent) input._credentialConsent.checked = false;
+            }
+            if (activeSetupRequest === controller) activeSetupRequest = null;
+          }
+        };
+        for (const control of controls) {
+          if (!control || control.disabled || !control.id || !control.label) continue;
+          const tag = String(control.tag || '').toLowerCase();
+          const typeValue = String(control.type || '').toLowerCase();
+          const label = `${control.label}${control.origin ? ` · ${control.origin}` : ''}`;
+          if (tag === 'button' || tag === 'a' || ['button', 'submit'].includes(typeValue)) {
+            if (!allowedActions.has('click')) continue;
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'admin-btn-sm';
+            button.textContent = label;
+            button.addEventListener('click', () => perform('click', String(control.id)));
+            viewHost.appendChild(button);
+            continue;
+          }
+          if (!allowedActions.has('fill')) continue;
+          const field = document.createElement('label');
+          field.className = 'settings-row';
+          const caption = document.createElement('span');
+          caption.className = 'settings-label';
+          caption.textContent = label;
+          const input = createRemoteField(control);
+          field.append(caption, input);
+          viewHost.appendChild(field);
+          if (input.type === 'password') {
+            const disclosure = document.createElement('p');
+            disclosure.className = 'integration-help';
+            disclosure.textContent = `If you choose to fill this password from ${control.origin || 'this page'}, it is sent over HTTPS to Odysseus server memory for this single action and cleared immediately after the request. It is not saved as a connector credential. Complete MFA yourself.`;
+            const consentLabel = document.createElement('label');
+            consentLabel.className = 'settings-row';
+            const consent = document.createElement('input');
+            consent.type = 'checkbox';
+            consentLabel.append(consent, document.createTextNode('I understand this password is sent for one HTTPS field-fill request.'));
+            input._credentialConsent = consent;
+            viewHost.append(disclosure, consentLabel);
+          }
+          const fill = document.createElement('button');
+          fill.type = 'button';
+          fill.className = 'admin-btn-sm';
+          fill.textContent = (input.type === 'checkbox' || input.type === 'radio' ? 'Apply ' : 'Fill ') + label;
+          fill.addEventListener('click', () => perform('fill', String(control.id), input));
+          viewHost.appendChild(fill);
+        }
+        for (const [action, label] of [['refresh', 'Refresh page'], ['back', 'Back'], ['close', 'Close page']]) {
+          if (!allowedActions.has(action)) continue;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'admin-btn-sm';
+          button.textContent = label;
+          button.addEventListener('click', async () => {
+            try {
+              const result = await connectorRequest(`/api/connectors/accounts/${id}/setup/action`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action }),
+              });
+              renderBrowserView(result.view || result);
+            } catch (error) { showConnectorOutput(stateNode, error.message || 'Could not update the browser page.', true); }
+          });
+          viewHost.appendChild(button);
+        }
+      };
+      const refreshBrowserView = async () => {
+        const view = await connectorRequest(`/api/connectors/accounts/${id}/setup/view`);
+        await renderBrowserView(view);
+      };
+      actions.append(addressLabel);
+      const navigate = document.createElement('button');
+      navigate.type = 'button';
+      navigate.className = 'admin-btn-add';
+      navigate.textContent = 'Open site';
+      navigate.addEventListener('click', async () => {
+        const target = publicUrl(address.value.trim());
+        if (!target) return showConnectorOutput(stateNode, 'Enter a public HTTP or HTTPS website address.', true);
+        navigate.disabled = true;
         try {
-          const value = courseId.value.trim();
-          if (!/^\d+$/.test(value)) throw new Error('Enter the numeric ID of one of your enrolled courses.');
-          showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/moodle/courses/${encodeURIComponent(value)}/contents`));
-        } catch (err) { showConnectorOutput(output, err.message, true); }
+          await browserAction({ action: 'navigate', url: target });
+          await refreshBrowserView();
+          stateNode.textContent = 'Page opened. Sign in yourself; purchase, checkout, and payment actions are blocked.';
+        } catch (error) { showConnectorOutput(stateNode, error.message || 'Could not open the website.', true); }
+        finally { navigate.disabled = false; }
       });
-      actions.append(courseId, contents);
-      actionButton('Sync courses/files', async () => {
-        const result = await connectorRequest(`/api/connectors/accounts/${id}/sync`, { method: 'POST' });
-        showConnectorOutput(output, result);
+      actionButton('Start browser session', async () => {
+        const result = await connectorRequest(`/api/connectors/accounts/${id}/setup/start`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        showConnectorOutput(stateNode, 'Browser profile is active; this does not mean you are signed in to a merchant.');
+        await refreshBrowserView();
         await renderList();
       });
-      actionButton('Login status', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/status`)));
-    } else if (type === 'whatsapp') {
-      actionButton('Pair / QR code', async () => {
-        const result = await get(`/api/connectors/accounts/${id}/whatsapp/pairing`);
-        output.textContent = JSON.stringify(result, null, 2);
-        if (result.qr_data_url) {
-          const image = document.createElement('img');
-          image.src = result.qr_data_url;
-          image.alt = 'WhatsApp pairing QR code';
-          image.style.cssText = 'display:block;max-width:240px;margin:8px auto';
-          output.appendChild(image);
-        }
+      actionButton('Session status', async () => {
+        const result = await connectorRequest(`/api/connectors/accounts/${id}/setup/status`);
+        const state = result.state || result.status || 'setup_required';
+        stateNode.textContent = state === 'connected'
+          ? 'Browser profile active; this does not mean you are signed in to a merchant.'
+          : `${connectorSetupStateLabel(state)}${result.message ? ` · ${result.message}` : ''}`;
       });
+      actionButton('Read page controls', async () => refreshBrowserView());
+      actionButton('Close browser session', async () => {
+        await connectorRequest(`/api/connectors/accounts/${id}/setup/stop`, { method: 'POST' });
+        stateNode.textContent = 'Browser session closed.';
+        viewHost.replaceChildren();
+      });
+      actions.append(navigate, stateNode, viewHost);
+    } else if (type === 'whatsapp') {
       actionButton('Sync history', async () => {
         const result = await connectorRequest(`/api/connectors/accounts/${id}/sync?max_pages=200`, { method: 'POST' });
         showConnectorOutput(output, result);
         await renderList();
       });
-      actionButton('Bridge status', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/status`)));
       actionButton('History progress', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/whatsapp/history`)));
       actionButton('List chats', async () => showConnectorOutput(output, await get(`/api/connectors/accounts/${id}/whatsapp/chats?limit=100`)));
       const chat = document.createElement('input');
@@ -3710,11 +4708,15 @@ async function initUnifiedIntegrations() {
       text.style.marginTop = '8px';
       const send = document.createElement('button');
       send.type = 'button'; send.className = 'admin-btn-add'; send.textContent = 'Send message';
+      send.dataset.writeEnabled = account.write_enabled === true ? 'true' : 'false';
+      send.disabled = send.dataset.writeEnabled !== 'true';
+      send.title = send.disabled ? 'Enable outbound messages above and save to send' : 'Send one message after confirmation';
       let pendingSend = null;
       send.addEventListener('click', async () => {
         const chatId = chat.value.trim();
         const message = text.value.trim();
         try {
+          if (send.dataset.writeEnabled !== 'true') throw new Error('Outbound messaging is off. Enable it and save the account first.');
           if (!chatId || !message) throw new Error('Enter a chat ID and message.');
           const intent = `${account.id}\0${chatId}\0${message}`;
           if (!pendingSend || pendingSend.intent !== intent) {
@@ -3736,7 +4738,7 @@ async function initUnifiedIntegrations() {
             ? { ...result, retry: 'Delivery is unknown. Retry the unchanged message to reuse the same idempotency key.' }
             : result);
         } catch (err) { showConnectorOutput(output, err.message, true); }
-        finally { send.disabled = false; }
+        finally { send.disabled = send.dataset.writeEnabled !== 'true'; }
       });
       const search = document.createElement('input');
       search.className = 'settings-input';
@@ -3776,29 +4778,41 @@ async function initUnifiedIntegrations() {
       const query = document.createElement('input');
       query.className = 'settings-input';
       query.placeholder = 'Place to find';
+      query.setAttribute('aria-label', 'Place or address to find');
       const geocode = document.createElement('button');
       geocode.type = 'button'; geocode.className = 'admin-btn-add'; geocode.textContent = 'Find place';
       geocode.addEventListener('click', async () => {
+        if (!query.value.trim()) return showConnectorOutput(output, 'Enter a place or address.', true);
+        geocode.disabled = true;
+        showConnectorOutput(output, 'Checking OpenRouteService access…');
         try {
-          if (!query.value.trim()) throw new Error('Enter a place or address.');
-          showConnectorOutput(output, await connectorRequest('/api/connectors/maps/geocode', {
+          const result = await connectorRequest('/api/connectors/maps/geocode', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: query.value.trim(), account_id: account.id }),
-          }));
-        } catch (err) { showConnectorOutput(output, err.message, true); }
+            body: JSON.stringify({ query: query.value.trim(), account_id: account.id, limit: 1 }),
+          });
+          showConnectorOutput(output, result);
+          await renderList();
+        } catch (err) { showConnectorOutput(output, err.message || 'Maps test failed. Check the API key and retry.', true); }
+        finally { geocode.disabled = false; }
       });
-      const from = document.createElement('input'); from.className = 'settings-input'; from.placeholder = 'Route origin';
-      const to = document.createElement('input'); to.className = 'settings-input'; to.placeholder = 'Route destination';
+      const from = document.createElement('input');
+      from.className = 'settings-input'; from.placeholder = 'Route origin'; from.setAttribute('aria-label', 'Route origin');
+      const to = document.createElement('input');
+      to.className = 'settings-input'; to.placeholder = 'Route destination'; to.setAttribute('aria-label', 'Route destination');
       const directions = document.createElement('button');
       directions.type = 'button'; directions.className = 'admin-btn-add'; directions.textContent = 'Directions';
       directions.addEventListener('click', async () => {
+        if (!from.value.trim() || !to.value.trim()) return showConnectorOutput(output, 'Enter both route locations.', true);
+        directions.disabled = true;
         try {
-          if (!from.value.trim() || !to.value.trim()) throw new Error('Enter both route locations.');
-          showConnectorOutput(output, await connectorRequest('/api/connectors/maps/directions', {
+          const result = await connectorRequest('/api/connectors/maps/directions', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ origin: from.value.trim(), destination: to.value.trim(), account_id: account.id }),
-          }));
-        } catch (err) { showConnectorOutput(output, err.message, true); }
+          });
+          showConnectorOutput(output, result);
+          await renderList();
+        } catch (err) { showConnectorOutput(output, err.message || 'Directions request failed. Check the API key and retry.', true); }
+        finally { directions.disabled = false; }
       });
       actions.append(query, geocode, from, to, directions);
     }
@@ -3808,20 +4822,30 @@ async function initUnifiedIntegrations() {
     formEl.innerHTML = `
       <div class="admin-card" style="margin-top:8px">
         <h2 style="font-size:13px">Shopping search</h2>
-        <p style="font-size:11px;opacity:.7">Searches public product listings. Merchant links are a manual handoff; this integration never purchases, enters a cart, or pays.</p>
-        <div style="display:flex;gap:6px"><input id="uf-shopping-query" class="settings-input" placeholder="What are you looking for?"><button type="button" class="admin-btn-add" id="uf-shopping-search">Search</button></div>
-        <div id="uf-shopping-output" style="max-height:360px;overflow:auto;margin-top:8px"></div>
+        <p class="integration-help">Searches public product listings only. Sign in yourself through the isolated Browser Session when a merchant requires it; the browser does not buy items, enter carts, or submit checkout/payment actions. Prices may be stale—verify them on the merchant page.</p>
+        <p><button type="button" class="admin-btn-sm" id="uf-shopping-browser-settings">Set up Browser Session for merchant sign-in</button></p>
+        <div style="display:flex;gap:6px"><input id="uf-shopping-query" class="settings-input" aria-label="Product search" placeholder="What are you looking for?"><button type="button" class="admin-btn-add" id="uf-shopping-search">Search</button></div>
+        <div id="uf-shopping-output" role="status" aria-live="polite" style="max-height:360px;overflow:auto;margin-top:8px"></div>
       </div>`;
     const output = el('uf-shopping-output');
+    el('uf-shopping-browser-settings').addEventListener('click', async () => {
+      try {
+        const accounts = await connectorRequest('/api/connectors/accounts');
+        const browserAccount = (accounts.accounts || []).find(item => item.provider === 'browser');
+        showForm('browser', browserAccount?.id || null);
+      } catch (error) { showConnectorOutput(output, error.message || 'Could not load Browser Session setup.', true); }
+    });
     const safeHttpUrl = raw => {
       try {
         const parsed = new URL(String(raw || ''));
         return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
       } catch (_) { return ''; }
     };
-    el('uf-shopping-search').addEventListener('click', async () => {
+    const searchButton = el('uf-shopping-search');
+    searchButton.addEventListener('click', async () => {
       const query = el('uf-shopping-query').value.trim();
       if (!query) return showConnectorOutput(output, 'Enter a product or query.', true);
+      searchButton.disabled = true;
       output.textContent = 'Searching public merchant listings…';
       try {
         const result = await connectorRequest(`/api/connectors/shopping/search?query=${encodeURIComponent(query)}`);
@@ -3870,27 +4894,37 @@ async function initUnifiedIntegrations() {
             const handoff = document.createElement('button');
             handoff.type = 'button';
             handoff.className = 'admin-btn-add';
-            handoff.textContent = 'Open in Browser Session';
+            handoff.textContent = 'Continue in Browser Session (sign in yourself)';
             handoff.addEventListener('click', async () => {
               handoff.disabled = true;
               try {
                 const accounts = await connectorRequest('/api/connectors/accounts');
                 const browser = (accounts.accounts || []).find(account => account.provider === 'browser');
-                if (!browser) throw new Error('Add a Browser Session in Settings > Integrations before using authenticated merchant browsing.');
+                if (!browser) throw new Error('Set up a Browser Session first; then return here to hand off the merchant page.');
                 const browserId = encodeURIComponent(browser.id);
-                const navigation = await connectorRequest(`/api/connectors/accounts/${browserId}/browser/action`, {
-                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                const status = await connectorRequest(`/api/connectors/accounts/${browserId}/setup/status`);
+                if ((status.state || status.status) !== 'connected') {
+                  await connectorRequest(`/api/connectors/accounts/${browserId}/setup/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                  });
+                }
+                await connectorRequest(`/api/connectors/accounts/${browserId}/browser/action`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ action: 'navigate', url: merchantUrl }),
                 });
-                showConnectorOutput(output, navigation);
-              } catch (err) { showConnectorOutput(output, err.message, true); }
+                showForm('browser', browser.id);
+              } catch (err) { showConnectorOutput(output, err.message || 'Could not open the merchant page in Browser Session.', true); }
               finally { handoff.disabled = false; }
             });
             card.appendChild(handoff);
           }
           output.appendChild(card);
         });
-      } catch (err) { showConnectorOutput(output, err.message, true); }
+      } catch (err) { showConnectorOutput(output, err.message || 'Shopping search failed. Retry when ready.', true); }
+      finally { searchButton.disabled = false; }
     });
   }
 
@@ -4571,6 +5605,8 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Display Name${_hint('Your name as it appears in the From: field of emails you send, e.g. Jane Smith. Auto-filled from Google during OAuth.')}</label><input id="uf-display-name" class="settings-input" placeholder="Your Name"></div>
           <div id="uf-oauth-section" style="display:none;margin:8px 0;padding:10px;border:1px solid var(--border);border-radius:6px;background:color-mix(in srgb,var(--accent,#50fa7b) 6%,transparent)">
             <div style="font-size:11px;font-weight:600;margin-bottom:6px">Google OAuth2 — required for Workspace / .edu accounts</div>
+            <p class="integration-help">The deployment may already have a Google OAuth client. Only if Connect with Google cannot start, ask the Odysseus deployment administrator to configure it—users do not need to edit environment files.</p>
+            <ol class="integration-help"><li><a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener noreferrer">Enable the Gmail API</a> in the Google Cloud project.</li><li>Configure the <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener noreferrer">OAuth consent screen</a>, including audience and any required test users.</li><li>Create a Web application OAuth client in <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Credentials</a>; register the exact redirect URI supplied by this Odysseus deployment. Ask its administrator for that URI—do not guess.</li><li>The administrator configures the client credentials, then you can use Connect with Google and complete consent yourself.</li></ol>
             <div id="uf-oauth-status" style="font-size:11px;opacity:0.7;margin-bottom:6px">${existing && existing.oauth_provider === 'google' ? '✓ Connected via Google OAuth' : 'Not connected — click below to authorize'}</div>
             <button type="button" id="uf-oauth-btn" class="admin-btn-add" style="font-size:11px">${existing && existing.oauth_provider === 'google' ? 'Reconnect with Google' : 'Connect with Google'}</button>
           </div>
@@ -5790,22 +6826,22 @@ async function initUnifiedIntegrations() {
   // ── Add button now drops a type-picker menu directly anchored to itself ──
   if (addBtn) {
     const _typeOptions = [
-      ['api', 'API Service'],
-      ['caldav', 'CalDAV Calendar'],
-      ['claude', 'Claude Agent'],
-      ['codex', 'Codex Agent'],
-      ['carddav', 'Contacts (CardDAV)'],
-      ['contacts', 'Contacts Import'],
-      ['email', 'Email (IMAP/SMTP)'],
-      ['moodle', 'ETH Moodle'],
-      ['browser', 'Browser Session'],
-      ['whatsapp', 'WhatsApp'],
-      ['maps', 'Maps'],
-      ['shopping', 'Shopping Search'],
-      ['mcp', 'MCP Tool Server'],
+      ['api', 'API Service', 'Connect an external API service.'],
+      ['caldav', 'CalDAV Calendar', 'Sync calendars you choose.'],
+      ['claude', 'Claude Agent', 'Configure a scoped agent token.'],
+      ['codex', 'Codex Agent', 'Configure a scoped agent token.'],
+      ['carddav', 'Contacts (CardDAV)', 'Sync contacts from a server.'],
+      ['contacts', 'Contacts Import', 'Import contacts into Odysseus.'],
+      ['email', 'Email (IMAP/SMTP)', 'Connect mail; sending is optional.'],
+      ['moodle', 'ETH Moodle', 'Read enrolled course content; optional indexing, no writes.'],
+      ['browser', 'Browser Session', 'Sign in yourself; form controls are semantic, checkout is blocked.'],
+      ['whatsapp', 'WhatsApp', 'Managed pairing; history read, outbound off by default.'],
+      ['maps', 'Maps', 'Geocoding and directions; OpenRouteService key required.'],
+      ['shopping', 'Shopping Search', 'Public product listings; no cart or purchase.'],
+      ['mcp', 'MCP Tool Server', 'Connect a tool server and review its permissions.'],
     ];
     const _iconFor = (k) => (INTG_TYPES[k]?.icon || '').replace(/width="14"/, 'width="16"').replace(/height="14"/, 'height="16"');
-    const _rowsHtml = _typeOptions.map(([k, label]) => `<button type="button" class="uf-type-option" data-value="${k}" style="display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;"><span style="display:inline-flex;color:var(--accent, var(--red));flex-shrink:0;">${_iconFor(k)}</span><span>${esc(label)}</span></button>`).join('');
+    const _rowsHtml = _typeOptions.map(([k, label, description]) => `<button type="button" class="uf-type-option" data-value="${k}" style="display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;background:transparent;border:0;color:var(--fg);font:inherit;cursor:pointer;text-align:left;"><span style="display:inline-flex;color:var(--accent, var(--red));flex-shrink:0;">${_iconFor(k)}</span><span style="min-width:0"><span style="display:block">${esc(label)}</span><small style="display:block;opacity:.62;font-size:10px;line-height:1.3">${esc(description)}</small></span></button>`).join('');
 
     // Anchor wrapper so the absolutely-positioned menu lands directly under
     // the add button. The button is the wrapper's only sibling.
@@ -5818,17 +6854,21 @@ async function initUnifiedIntegrations() {
     // listener + Escape-stack entry are torn down alongside the node removal.
     let _menuEl = null;
     let _closeMenu = () => {};
+    addBtn.setAttribute('aria-haspopup', 'menu');
+    addBtn.setAttribute('aria-expanded', 'false');
     addBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (_menuEl) { _closeMenu(); return; }
       const menu = document.createElement('div');
       menu.className = 'uf-add-menu';
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('aria-label', 'Add an integration');
       menu.innerHTML = _rowsHtml;
       menu.style.cssText = 'position:absolute;right:0;z-index:1000;background:var(--panel);border:1px solid var(--border);border-radius:6px;max-height:340px;overflow-y:auto;box-shadow:0 6px 18px rgba(0,0,0,0.25);min-width:220px;';
+      menu.querySelectorAll('.uf-type-option').forEach(button => button.setAttribute('role', 'menuitem'));
       addBtn.parentElement.appendChild(menu);
       _menuEl = menu;
-      // Drop-up when there isn't enough room below the button (modal near
-      // the viewport bottom, mobile keyboard up, etc.).
+      addBtn.setAttribute('aria-expanded', 'true');
       const tRect = addBtn.getBoundingClientRect();
       const mRect = menu.getBoundingClientRect();
       const below = window.innerHeight - tRect.bottom;
@@ -5838,21 +6878,44 @@ async function initUnifiedIntegrations() {
       } else {
         menu.style.top = 'calc(100% + 2px)'; menu.style.bottom = 'auto';
       }
-      menu.querySelectorAll('.uf-type-option').forEach(btn => {
-        btn.addEventListener('mouseenter', () => { btn.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
-        btn.addEventListener('mouseleave', () => { btn.style.background = 'transparent'; });
-        btn.addEventListener('click', (ev) => {
+      menu.querySelectorAll('.uf-type-option').forEach(button => {
+        button.addEventListener('mouseenter', () => { button.style.background = 'color-mix(in srgb, var(--fg) 8%, transparent)'; });
+        button.addEventListener('mouseleave', () => { button.style.background = 'transparent'; });
+        button.addEventListener('click', (ev) => {
           ev.stopPropagation();
-          const k = btn.dataset.value;
+          const k = button.dataset.value;
           _closeMenu();
           formEl.style.display = '';
           showForm(k, null);
         });
       });
-      _closeMenu = bindMenuDismiss(menu, () => { menu.remove(); _menuEl = null; }, (ev) => !menu.contains(ev.target) && ev.target !== addBtn);
+      _closeMenu = bindMenuDismiss(menu, () => {
+        menu.remove();
+        _menuEl = null;
+        addBtn.setAttribute('aria-expanded', 'false');
+      }, (ev) => !menu.contains(ev.target) && ev.target !== addBtn);
+      menu.addEventListener('keydown', event => {
+        const items = Array.from(menu.querySelectorAll('.uf-type-option'));
+        const current = items.indexOf(document.activeElement);
+        let next = current;
+        if (event.key === 'ArrowDown') next = (current + 1 + items.length) % items.length;
+        else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = items.length - 1;
+        else if (event.key === 'Escape') { event.preventDefault(); _closeMenu(); addBtn.focus(); return; }
+        else return;
+        event.preventDefault();
+        items[next]?.focus();
+      });
+      menu.querySelector('.uf-type-option')?.focus();
     });
   }
 
+  try {
+    connectorSetupMetadata = await connectorRequest('/api/connectors/setup');
+  } catch (error) {
+    connectorSetupMetadataError = error.message || 'Setup metadata is unavailable.';
+  }
   await renderList();
 }
 

@@ -736,6 +736,8 @@ _APP_API_BLOCKLIST_PREFIXES = (
     "/api/admin",          # admin one-shots (wipe etc.)
     "/api/shell",          # host shell execution must stay behind named command tooling
     "/api/backup/restore", # destructive restore
+    "/api/connectors",     # use named owner/account-scoped tools; setup and credentials are human-only
+    "/api/assistant/settings",  # agent account grants cannot be self-expanded via loopback
 )
 
 # (method, prefix) pairs to refuse specifically. Used for endpoints
@@ -861,7 +863,13 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
         return {"error": "path is required (e.g. '/api/cookbook/gpus')", "exit_code": 1}
     if not path.startswith("/"):
         path = "/" + path
-    if any(path.startswith(p) for p in _APP_API_BLOCKLIST_PREFIXES):
+    from posixpath import normpath
+    from urllib.parse import unquote, urlsplit
+    parsed_path = urlsplit(path)
+    if parsed_path.scheme or parsed_path.netloc:
+        return {"error": "Path blocked for safety: use a local API path, not a network URL.", "exit_code": 1}
+    guard_path = "/" + normpath(unquote(parsed_path.path)).lstrip("/")
+    if any(guard_path.startswith(p) for p in _APP_API_BLOCKLIST_PREFIXES):
         return {"error": f"Path blocked for safety: {path}. Sensitive endpoints are off-limits via app_api.", "exit_code": 1}
 
     method = (args.get("method") or "GET").upper()

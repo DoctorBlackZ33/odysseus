@@ -33,6 +33,32 @@ const request = (route, options = {}) => fetch(`${baseUrl}/api/v1/${route}`, {
   headers: { ...(options.body ? { 'content-type': 'application/json' } : {}), ...(options.headers || {}) },
 })
 const auth = { authorization: `Bearer ${token}`, 'x-whatsapp-account-id': accountId }
+test('pairing is transient, authenticated, and refuses expired QR before timer cleanup', async () => {
+  let pairing = { qr: 'first-synthetic', expiresAt: new Date(Date.now() + 60_000).toISOString() }
+  const api = createWhatsAppApi({
+    store: {}, history: { progress: () => ({ initial: {} }) }, accountId, apiToken: token,
+    getSocket: () => null, getConnection: () => 'connecting', isReady: () => false,
+    getPairing: () => pairing,
+  })
+  const listener = api.listen(0, '127.0.0.1')
+  await new Promise(resolve => listener.once('listening', resolve))
+  const url = `http://127.0.0.1:${listener.address().port}/api/v1`
+  try {
+    assert.equal((await fetch(`${url}/pairing`)).status, 401)
+    let response = await fetch(`${url}/pairing`, { headers: auth })
+    assert.match(response.headers.get('cache-control'), /no-store/)
+    assert.equal((await response.json()).qr, 'first-synthetic')
+    pairing = { qr: 'rotated-synthetic', expiresAt: new Date(Date.now() + 60_000).toISOString() }
+    assert.equal((await (await fetch(`${url}/pairing`, { headers: auth })).json()).qr, 'rotated-synthetic')
+    pairing.expiresAt = new Date(Date.now() - 1).toISOString()
+    response = await fetch(`${url}/pairing`, { headers: auth })
+    assert.equal((await response.json()).qr, null)
+    assert.equal((await (await fetch(`${url}/status`, { headers: auth })).json()).qrAvailable, false)
+  } finally {
+    await new Promise(resolve => listener.close(resolve))
+  }
+})
+
 
 test('incremental record cursors include mutations made in the same millisecond', () => {
   const now = Date.now

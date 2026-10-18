@@ -1360,6 +1360,20 @@ class TaskScheduler:
             task.action, owner=task.owner)
         from src.settings import get_setting
         authority = authority.restrict(disabled_tools=get_setting("disabled_tools", []) or ())
+        connector_tool = {"whatsapp_sync": "connector_sync", "whatsapp_send_message": "whatsapp_send"}.get(task.action)
+        if connector_tool and getattr(task, "crew_member_id", None):
+            from core.database import CrewMember, SessionLocal
+            scope_db = SessionLocal()
+            try:
+                action_crew = scope_db.query(CrewMember).filter(
+                    CrewMember.id == task.crew_member_id, CrewMember.owner == task.owner).first()
+                if action_crew is None:
+                    return "Scheduled connector agent not found for this owner.", False
+                enabled = json.loads(action_crew.enabled_tools) if action_crew.enabled_tools else None
+                if isinstance(enabled, list) and connector_tool not in enabled:
+                    return "This connector tool is disabled for the scheduled agent.", False
+            finally:
+                scope_db.close()
         operation = task_operation(task.task_type, task.action, task.prompt)
         if operation is None or not authority.permits(operation):
             return "Scheduled action has no matching server request authority.", False
@@ -1391,7 +1405,8 @@ class TaskScheduler:
             if getattr(task, "model", None):
                 kwargs["model"] = task.model
                 kwargs["endpoint_url"] = getattr(task, "endpoint_url", None)
-            with bind_request_authority(authority):
+            from services.connector_grants import bind as bind_connector_grants
+            with bind_request_authority(authority), bind_connector_grants(task.owner, crew_id=getattr(task, "crew_member_id", None)):
                 result, success = await action_fn(**kwargs)
             if getattr(task, "model", None):
                 self._last_run_model = task.model
@@ -2054,7 +2069,8 @@ class TaskScheduler:
             getattr(task, "request_authority_json", None), task.prompt,
             getattr(task, "task_type", "llm"), getattr(task, "action", None),
             owner=task.owner, session_id=session_id)
-        async with contextlib.aclosing(stream_agent_loop(
+        from services.connector_grants import scoped_stream
+        async with contextlib.aclosing(scoped_stream(stream_agent_loop(
                 endpoint_url=endpoint_url,
                 model=model,
                 messages=messages,
@@ -2068,7 +2084,7 @@ class TaskScheduler:
                 fallbacks=_task_fallbacks,
                 workload="background",
                 request_authority=request_authority,
-        )) as agent_stream:
+        ), task.owner, getattr(task, "crew_member_id", None))) as agent_stream:
             async for event_str in agent_stream:
                 if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
                     try:

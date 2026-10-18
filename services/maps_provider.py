@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from services.connector_store import get_account, list_accounts
+from services.connector_store import get_account, list_accounts, update_account
 
 _ORS = "https://api.openrouteservice.org"
 _CACHE: dict[tuple, tuple[float, Any]] = {}
@@ -73,6 +73,7 @@ async def geocode(owner: str, query: str, *, account_id: str | None = None, limi
             )
         _check_response(response)
         payload = response.json()
+        update_account(owner, resolved_account_id, status="connected", last_error="")
         features = []
         for feature in payload.get("features") or []:
             coordinates = (feature.get("geometry") or {}).get("coordinates") or []

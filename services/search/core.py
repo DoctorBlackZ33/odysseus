@@ -125,20 +125,14 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
     return []
 
 
-# If the self-hosted SearXNG instance is up but all enabled engines return
-# empty, fall back to the no-key provider so "search X" still works on fresh
-# installs. Users can override/disable with `search_fallback_chain`.
-_FALLBACK_ORDER = ["duckduckgo"]
-
-
 def _build_provider_chain(primary: str) -> List[str]:
-    """Build ordered list: primary first, then configured/default fallbacks."""
+    """Build ordered list: primary first, then explicitly configured fallbacks."""
     chain = [primary]
     settings = _get_search_settings()
-    user_chain = settings.get("search_fallback_chain") or []
+    user_chain = settings.get("search_fallback_chain")
     if isinstance(user_chain, str):
         user_chain = [s.strip() for s in user_chain.split(",") if s.strip()]
-    fallbacks = user_chain if user_chain else _FALLBACK_ORDER
+    fallbacks = user_chain if isinstance(user_chain, list) else []
     for fb in fallbacks:
         if fb and fb != primary and fb not in chain and fb != "disabled":
             chain.append(fb)
@@ -147,9 +141,8 @@ def _build_provider_chain(primary: str) -> List[str]:
     for provider in set(chain) - set(configured):
         logger.warning("Skipping unconfigured search provider: %s", provider)
     if primary == "searxng" and "searxng_yep" not in configured:
-        # The no-key DuckDuckGo fallback can be configured yet unavailable or
-        # CAPTCHA-limited. Always retain a distinct engine on the private
-        # metasearch instance before reporting retrieval failure.
+        # Retain another engine on the same configured private instance,
+        # without silently switching to a different direct-search provider.
         configured.insert(1, "searxng_yep")
     return configured
 

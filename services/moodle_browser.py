@@ -5,6 +5,8 @@ import asyncio
 import logging
 import os
 import re
+import hashlib
+import time
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import httpx
 from bs4 import BeautifulSoup
@@ -21,6 +23,7 @@ _contexts: dict[tuple[str, str, str], tuple[object, object]] = {}
 _lock = asyncio.Lock()
 _proxy_server = None
 _proxy_port: int | None = None
+_token_checks: dict[tuple[str, str, str], tuple[str, float, bool]] = {}
 
 
 
@@ -492,7 +495,7 @@ async def _get_playwright():
     playwright = await async_playwright().start()
     headless = os.environ.get(
         "ODYSSEUS_BROWSER_HEADLESS",
-        os.environ.get("ODYSSEUS_MOODLE_BROWSER_HEADLESS", "false"),
+        os.environ.get("ODYSSEUS_MOODLE_BROWSER_HEADLESS", "true"),
     ).lower() in {"1", "true", "yes"}
     if not headless and not os.environ.get("DISPLAY") and os.name != "nt" and os.environ.get("WAYLAND_DISPLAY") is None:
         await playwright.stop()
@@ -554,6 +557,9 @@ async def _context_for(owner: str | None, account_id: str, *, create: bool = Fal
             raise MoodleAccessError("Browser egress protection requires Playwright 1.48 or newer")
         await context.route_web_socket("**/*", _guard_browser_websocket)
         page = await context.new_page()
+        if provider == "moodle":
+            from services.moodle_handoff import attach
+            attach(owner, account_id, context)
         _contexts[key] = (browser, context)
         if provider == "moodle":
             try:
@@ -591,13 +597,24 @@ async def _looks_authenticated(page) -> bool:
 async def _save_state(owner: str | None, account_id: str, context,
                       provider: str = "moodle") -> bool:
     try:
+        if provider == "moodle" and not await _looks_authenticated(await _page(context)):
+            return False
         account = get_account(owner, account_id, provider=provider, with_credentials=True)
         if not account:
             return False
         state = await context.storage_state()
         credentials = account.get("credentials", {})
         credentials["browser_storage_state"] = state
-        update_account(owner, account_id, credentials=credentials, status="connected", last_error="")
+        config = None
+        if provider == "moodle":
+            from services.moodle_handoff import pending
+            if pending(owner, account_id):
+                # A newly authenticated website session replaces any previous
+                # token identity, even if mobile-token issuance is unavailable.
+                credentials.pop("moodle_token", None)
+                config = dict(account.get("config") or {})
+                config["auth_mode"] = "browser"
+        update_account(owner, account_id, credentials=credentials, config=config, status="connected", last_error="")
         return True
     except Exception:
         logger.debug("Could not persist browser session state", exc_info=True)
@@ -605,16 +622,59 @@ async def _save_state(owner: str | None, account_id: str, context,
 
 
 async def start_browser_login(owner: str | None, account_id: str) -> dict:
+    from services.moodle_handoff import begin, pending
+    from services.connector_login_view import public_url
+    flow = begin(owner, account_id, remote=True)
     context = await _context_for(owner, account_id, create=True)
     page = await _page(context)
     try:
-        await page.goto(MOODLE_LOGIN, wait_until="domcontentloaded", timeout=30000)
-    except Exception as exc:
-        raise MoodleAccessError("Could not open ETH Shibboleth login in the scoped browser profile") from exc
-    return {"opened": True, "url": page.url, "status": "login_required", "instructions": "Complete ETH Shibboleth and MFA directly. Password values entered in Settings pass through Odysseus's backend for that one HTTPS field fill; they are not saved as connector credentials."}
+        await page.goto(flow["launch_url"], wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        # A completed custom-scheme handoff can intentionally interrupt navigation.
+        if pending(owner, account_id):
+            raise MoodleAccessError("Could not open ETH sign-in. Retry the remote window or use normal-browser handoff.") from None
+    return {"opened": True, "url": public_url(page.url), "state": "awaiting_login",
+            "status": "login_required", "instructions": "Complete ETH SSO and MFA in the remote window. Passwords pass through this server only for the requested HTTPS fill; they are not saved as connector credentials."}
 
 
 async def browser_status(owner: str | None, account_id: str) -> dict:
+    account = get_account(owner, account_id, provider="moodle", with_credentials=True)
+    if not account:
+        raise MoodleAccessError("Moodle account not found")
+    from services.moodle_handoff import pending
+    login = pending(owner, account_id)
+    if login and not login["remote"]:
+        return {"status": "login_required", "authenticated": False,
+                "message": "Finish the normal-browser SSO handoff and paste Moodle's Open app link; this browser's cookies are not accessible to Odysseus."}
+    if login and login["remote"]:
+        context = await _context_for(owner, account_id, create=False)
+        if context is not None:
+            from services.moodle_handoff import capture
+            try:
+                await capture(owner, account_id, await _page(context))
+            except ValueError:
+                pass
+            login = pending(owner, account_id)
+    account = get_account(owner, account_id, provider="moodle", with_credentials=True)
+    if not login and "sign-in session expired" in str(account.get("last_error") or ""):
+        return {"status": "login_required", "authenticated": False, "expired": True,
+                "message": "Moodle sign-in session expired; start a fresh ETH sign-in."}
+    token = "" if login else str((account.get("credentials") or {}).get("moodle_token") or "")
+    if token:
+        fingerprint = hashlib.sha256(token.encode()).hexdigest()
+        cache_key = _key(owner, account_id)
+        cached = _token_checks.get(cache_key)
+        valid = cached[2] if cached and cached[0] == fingerprint and cached[1] > time.monotonic() else None
+        if valid is None:
+            try:
+                info = await _rest_call(owner, account_id, "core_webservice_get_site_info")
+                valid = bool(info and info.get("userid"))
+            except MoodleAccessError:
+                valid = False
+            _token_checks[cache_key] = (fingerprint, time.monotonic() + 60, valid)
+        message = None if valid else ("Moodle token could not be verified. Check that it is current and authorized for this service, replace it and save again, or choose ETH website sign-in." if account.get("config", {}).get("auth_mode") == "token" else "Moodle mobile session expired; sign in again.")
+        return {"status": "connected" if valid else "login_required", "authenticated": valid,
+                "token_valid": valid, "message": message}
     context = await _context_for(owner, account_id, create=False)
     if context is None:
         account = get_account(owner, account_id, provider="moodle", with_credentials=True)
@@ -632,7 +692,8 @@ async def browser_status(owner: str | None, account_id: str) -> dict:
         await _save_state(owner, account_id, context)
     update_account(owner, account_id, status="connected" if authenticated else "login_required",
                    last_error="" if authenticated else "ETH Moodle session needs sign-in.")
-    return {"status": "connected" if authenticated else "login_required", "authenticated": authenticated, "url": page.url}
+    from services.connector_login_view import public_url
+    return {"status": "connected" if authenticated else "login_required", "authenticated": authenticated, "url": public_url(page.url)}
 
 
 async def _browser_page(owner: str | None, account_id: str, path: str):
@@ -1085,6 +1146,11 @@ async def download_browser_file(owner: str | None, account_id: str,
 async def close_browser_profile(owner: str | None, account_id: str, *,
                                 provider: str = "moodle") -> None:
     """Close one owner's live context without affecting other browser profiles."""
+    from services.connector_login_view import clear
+    await clear(owner, account_id, provider)
+    if provider == "moodle":
+        from services.moodle_handoff import cancel
+        cancel(owner, account_id)
     current = _contexts.pop(_key(owner, account_id, provider), None)
     if current:
         try:
@@ -1097,7 +1163,9 @@ async def close_browser_profile(owner: str | None, account_id: str, *,
 
 async def shutdown_browser() -> None:
     global _browser, _playwright, _proxy_server, _proxy_port
-    for browser, context in list(_contexts.values()):
+    from services.connector_login_view import clear
+    for (owner, account_id, provider), (browser, context) in list(_contexts.items()):
+        await clear(owner, account_id, provider)
         try:
             await context.close()
         except Exception:

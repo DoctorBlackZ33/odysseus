@@ -62,6 +62,23 @@ async function _listTimezones() {
     return ['UTC'];
   }
 }
+async function _listConnectorAccounts() {
+  const [connectors, email] = await Promise.all([
+    _fetchJSON('/api/connectors/accounts'),
+    _fetchJSON('/api/connectors/email-accounts'),
+  ]);
+  const emailAccounts = (email.accounts || []).map(account => ({
+    ...account,
+    provider: 'gmail',
+    name: account.name || account.email || 'Email retrieval',
+    config: {
+      semantic_index: account.semantic_index,
+      auto_sync: account.auto_sync,
+      sync_interval_minutes: account.sync_interval_minutes,
+    },
+  }));
+  return [...(connectors.accounts || []), ...emailAccounts];
+}
 
 async function _runCheckInNow(taskId) {
   try {
@@ -122,7 +139,10 @@ function _esc(s) {
 const TOOL_GROUPS = {
   'Email': ['list_emails', 'read_email', 'download_attachment', 'send_email', 'reply_to_email', 'archive_email', 'delete_email', 'mark_email_read'],
   'Calendar & Notes': ['manage_calendar', 'manage_notes', 'manage_tasks'],
-  'Knowledge': ['web_search', 'read_file', 'manage_memory', 'manage_rag', 'search_chats'],
+  'Knowledge': ['web_search', 'read_file', 'manage_memory', 'manage_rag', 'search_chats', 'connector_search'],
+  'Connectors': ['moodle_read', 'whatsapp_read', 'whatsapp_send', 'connector_sync'],
+  'Maps & Shopping': ['maps_search', 'shopping_search'],
+  'Browser': ['browser_session'],
   'Code': ['bash', 'python', 'write_file'],
   'Documents': ['create_document', 'edit_document', 'update_document', 'suggest_document'],
   'AI & Models': ['chat_with_model', 'ask_teacher', 'pipeline', 'list_models', 'generate_image'],
@@ -136,13 +156,32 @@ async function _fetchEndpoints() {
   } catch { return []; }
 }
 
-function _renderSettingsBody(body, data, tzList) {
+function _renderSettingsBody(body, data, tzList, connectorAccounts = []) {
   const crew = data.crew || {};
   const checkIns = data.check_ins || [];
   const enabledTools = new Set(crew.enabled_tools || []);
+  const connectorIds = Array.isArray(crew.connector_account_ids) ? crew.connector_account_ids : null;
+  const connectorMode = connectorIds === null ? 'inherit' : connectorIds.length ? 'selected' : 'none';
   const tzOptions = tzList.map((z) =>
     `<option value="${_esc(z)}"${z === crew.timezone ? ' selected' : ''}>${_esc(z)}</option>`
   ).join('');
+  const connectorAccountsHTML = connectorAccounts.map((account) => {
+    const selected = connectorIds?.some(id => id === account.id || id === account.retrieval_index_id) ? ' checked' : '';
+    const provider = String(account.provider || 'connector').replace(/_/g, ' ');
+    const status = account.setup_status || account.status || 'setup status unavailable';
+    const label = account.name || account.label || provider;
+    const config = account.config || {};
+    const details = [provider, status];
+    if (['gmail', 'moodle', 'whatsapp'].includes(account.provider)) {
+      details.push(config.semantic_index ? (account.index_status || 'semantic index on') : 'keyword retrieval only');
+      if (config.auto_sync) details.push(`auto-pull every ${Number(config.sync_interval_minutes || 30)} min`);
+    }
+    if (account.provider === 'whatsapp') details.push(account.write_enabled ? 'outbound on' : 'outbound off');
+    return `<label class="assistant-tool-item">
+      <input type="checkbox" class="assistant-connector-account-cb" value="${_esc(account.id)}"${selected} />
+      <span>${_esc(label)} <small>${_esc(details.join(' · '))}</small></span>
+    </label>`;
+  }).join('');
   const checkInsHTML = checkIns.map((c) => `
     <div class="assistant-checkin-row" data-task-id="${_esc(c.id)}">
       <div class="assistant-checkin-head">
@@ -217,6 +256,19 @@ function _renderSettingsBody(body, data, tzList) {
           ${toolsHTML}
         </div>
       </div>
+      <fieldset class="assistant-field">
+        <legend>Connector account access</legend>
+        <label for="assistant-connector-account-mode">Accounts this assistant may use</label>
+        <select id="assistant-connector-account-mode">
+          <option value="inherit"${connectorMode === 'inherit' ? ' selected' : ''}>Inherit my current account access</option>
+          <option value="selected"${connectorMode === 'selected' ? ' selected' : ''}>Only selected accounts</option>
+          <option value="none"${connectorMode === 'none' ? ' selected' : ''}>No connector accounts</option>
+        </select>
+        <p>Account restrictions are enforced by Odysseus when tools run. Enable the matching tool grants above too. WhatsApp sending also requires outbound access to be enabled on that account.</p>
+        <div id="assistant-connector-account-list" class="assistant-tools-grid"${connectorMode !== 'selected' ? ' aria-disabled="true"' : ''}>
+          ${connectorAccountsHTML || '<p>No connector accounts are available to this user yet.</p>'}
+        </div>
+      </fieldset>
       <div class="assistant-checkins">
         <h5>Daily check-ins</h5>
         ${checkInsHTML || '<div style="opacity:0.6;">No check-ins configured.</div>'}
@@ -337,11 +389,29 @@ function _renderSettingsBody(body, data, tzList) {
     });
   }
 
-  // ── Event wiring ──
+  const accountModeSelect = body.querySelector('#assistant-connector-account-mode');
+  const accountList = body.querySelector('#assistant-connector-account-list');
+  const updateAccountCheckboxes = () => {
+    const selectedMode = accountModeSelect.value === 'selected';
+    accountList.setAttribute('aria-disabled', String(!selectedMode));
+    accountList.querySelectorAll('.assistant-connector-account-cb').forEach((checkbox) => {
+      checkbox.disabled = !selectedMode;
+    });
+  };
+  accountModeSelect.addEventListener('change', updateAccountCheckboxes);
+  updateAccountCheckboxes();
+ 
+ 
   body.querySelector('#assistant-settings-cancel').addEventListener('click', _closeModal);
   body.querySelector('#assistant-settings-save').addEventListener('click', async () => {
     const selectedTools = [];
     body.querySelectorAll('.assistant-tool-cb:checked').forEach(cb => selectedTools.push(cb.value));
+    const accountMode = accountModeSelect.value;
+    const connectorAccountIds = accountMode === 'inherit'
+      ? null
+      : accountMode === 'none'
+        ? []
+        : Array.from(body.querySelectorAll('.assistant-connector-account-cb:checked'), checkbox => checkbox.value);
     const payload = {
       name: body.querySelector('#assistant-name').value.trim(),
       personality: body.querySelector('#assistant-personality').value,
@@ -349,6 +419,7 @@ function _renderSettingsBody(body, data, tzList) {
       model: body.querySelector('#assistant-model').value || null,
       endpoint_url: body.querySelector('#assistant-endpoint').value || null,
       enabled_tools: selectedTools,
+      connector_account_ids: connectorAccountIds,
       check_ins: Array.from(body.querySelectorAll('.assistant-checkin-row')).map((row) => ({
         id: row.dataset.taskId,
         name: row.querySelector('.assistant-checkin-name').value.trim(),
@@ -405,8 +476,12 @@ export async function openAssistantSettings() {
   const body = modal.querySelector('#assistant-settings-body');
   body.innerHTML = '<div class="hwfit-loading">Loading…</div>';
   try {
-    const [data, tzList] = await Promise.all([_getSettings(true), _listTimezones()]);
-    _renderSettingsBody(body, data, tzList);
+    const [data, tzList, connectorAccounts] = await Promise.all([
+      _getSettings(true),
+      _listTimezones(),
+      _listConnectorAccounts(),
+    ]);
+    _renderSettingsBody(body, data, tzList, connectorAccounts);
   } catch (e) {
     console.error(e);
     body.innerHTML = '<div style="padding:12px;opacity:0.6;">Could not load assistant settings.</div>';

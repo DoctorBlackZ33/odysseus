@@ -158,7 +158,7 @@ async def whatsapp_read(content: str, ctx: dict) -> dict:
         action = str(args.get("action") or "status")
         if action == "status":
             value = await provider.status()
-            value["app_write_enabled"] = whatsapp_write_enabled()
+            value["app_write_enabled"] = whatsapp_write_enabled(owner, account_id)
         elif action == "history":
             value = {"history": await provider.sync(), "progress": await provider.history_progress()}
         elif action == "chats":
@@ -220,8 +220,8 @@ async def whatsapp_send(content: str, ctx: dict) -> dict:
             raise ValueError("WhatsApp connector account not found for this owner")
         if not chat_id or not text.strip():
             raise ValueError("chat_id and text are required")
-        if not whatsapp_write_enabled():
-            raise PermissionError("WhatsApp sending is disabled; set WHATSAPP_ENABLE_WRITES=true in the app and bridge environments")
+        if not whatsapp_write_enabled(owner, account_id):
+            raise PermissionError("WhatsApp sending is disabled; enable it separately for this account in Integrations")
         provider = whatsapp_provider(owner, account_id)
         run_id = str((ctx or {}).get("tool_run_id") or "").strip()
         if not run_id:

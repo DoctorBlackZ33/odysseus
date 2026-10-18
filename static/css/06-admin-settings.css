@@ -1436,3 +1436,154 @@ body.right-dock-active:not(.email-doc-split-active) .doc-editor-pane {
   box-shadow: -4px 0 14px rgba(0, 0, 0, 0.18);
   border-radius: 0;
 }
+/* Connector setup uses the existing Settings surfaces and theme tokens. */
+.sidebar-integration-link {
+  appearance: none;
+  border: 0;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px;
+  margin: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-integration-link:hover,
+.sidebar-integration-link:focus-visible {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.sidebar-integration-link:focus-visible {
+  outline: 2px solid var(--accent, var(--red));
+  outline-offset: 1px;
+}
+.sidebar-integration-link .sidebar-action-icon { flex: 0 0 auto; opacity: .62; }
+.integration-permission-note {
+  margin: 8px 0 12px;
+  padding: 9px 11px;
+  border-left: 3px solid var(--accent, var(--red));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent, var(--red)) 7%, transparent);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.integration-wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 12px;
+}
+.integration-wizard-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--fg) 72%, transparent);
+}
+.integration-wizard-step[aria-current="step"] {
+  color: var(--fg);
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent);
+}
+.integration-setup-status {
+  min-height: 20px;
+  margin: 8px 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.integration-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.integration-help {
+  margin: 8px 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.integration-help ol,
+.integration-help ul { margin: 5px 0 0; padding-left: 19px; }
+.integration-help li + li { margin-top: 3px; }
+.integration-help a { color: var(--accent, var(--red)); text-decoration: underline; }
+.integration-qr {
+  display: block;
+  width: min(240px, 100%);
+  height: auto;
+  margin: 10px auto;
+  padding: 7px;
+  border-radius: 8px;
+  background: #fff;
+}
+.integration-remote-screenshot {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 10px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.integration-wizard .settings-input { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.integration-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 3px;
+  border-radius: 50%;
+  background: var(--color-success, #50fa7b);
+  vertical-align: 1px;
+}
+.integration-status-dot-idle {
+  background: var(--fg);
+  opacity: .38;
+}
+.adm-provider-item:focus-visible,
+.uf-type-option:focus-visible {
+  outline: 2px solid var(--accent, var(--red));
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+.integration-help button,
+.integration-help input,
+.integration-help select { max-width: 100%; }
+.integration-card-edit {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.integration-card-edit:focus-visible {
+  outline: 2px solid var(--accent, var(--red));
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+@media (max-width: 620px) {
+  .integration-setup-actions { justify-content: stretch; }
+  .integration-setup-actions > button { flex: 1 1 auto; min-height: 40px; }
+  .integration-permission-note { font-size: 12px; }
+  .integration-wizard .settings-row { flex-wrap: wrap; gap: 6px; }
+  .integration-wizard .settings-row > .settings-input { flex: 1 1 180px; }
+}
+
+/* Layout declarations must not override the wizard's conditional sections. */
+.integration-wizard [hidden] { display: none !important; }

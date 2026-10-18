@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -106,6 +107,10 @@ def _semantic_upsert(record: ConnectorSourceRecord, text: str) -> bool:
 def _scoped_records(db, owner_key: str, *, providers=None, account_id=None,
                     chat_id=None, source_type=None, since=None, until=None):
     query_db = db.query(ConnectorSourceRecord).filter(ConnectorSourceRecord.owner.in_(_owner_scopes(owner_key)))
+    from services.connector_grants import allowed_ids
+    grants = allowed_ids(owner_key)
+    if grants is not None:
+        query_db = query_db.filter(ConnectorSourceRecord.account_id.in_(grants))
     if providers:
         query_db = query_db.filter(ConnectorSourceRecord.provider.in_(providers))
     if account_id:
@@ -127,15 +132,24 @@ def _scoped_records(db, owner_key: str, *, providers=None, account_id=None,
 
 
 
+def whatsapp_write_policy_enabled(config: dict | None = None) -> bool:
+    """Advertise and enforce the same managed-account or external-operator opt-in."""
+    if (config or {}).get("mode") == "managed":
+        return bool(config.get("write_enabled"))
+    return os.environ.get("WHATSAPP_ENABLE_WRITES", "").strip().lower() in {"1", "true", "yes"}
+
+
 def account_view(row: ConnectorAccount) -> dict[str, Any]:
     credentials = _parse_json(decrypt(row.credentials), {})
+    config = _parse_json(row.config, {})
     return {
         "id": row.id,
         "owner": _owner(row.owner),
         "provider": row.provider,
         "name": row.name,
         "status": row.status,
-        "config": _parse_json(row.config, {}),
+        "config": config,
+        "write_enabled": row.provider == "whatsapp" and whatsapp_write_policy_enabled(config),
         "has_credentials": bool(credentials),
         "last_sync_at": row.last_sync_at.isoformat() + "Z" if row.last_sync_at else None,
         "last_error": row.last_error,
@@ -170,6 +184,10 @@ def list_accounts(owner: str | None, provider: str | None = None) -> list[dict[s
     db = SessionLocal()
     try:
         query = db.query(ConnectorAccount).filter(ConnectorAccount.owner.in_(_owner_scopes(owner)))
+        from services.connector_grants import allowed_ids
+        grants = allowed_ids(_owner(owner))
+        if grants is not None:
+            query = query.filter(ConnectorAccount.id.in_(grants))
         if provider:
             query = query.filter(ConnectorAccount.provider == provider)
         return [account_view(row) for row in query.order_by(ConnectorAccount.created_at.asc()).all()]
@@ -179,6 +197,7 @@ def list_accounts(owner: str | None, provider: str | None = None) -> list[dict[s
 
 def get_account(owner: str | None, account_id: str, provider: str | None = None,
                 *, with_credentials: bool = False) -> dict[str, Any] | None:
+    from services.connector_grants import require_account
     db = SessionLocal()
     try:
         query = db.query(ConnectorAccount).filter(
@@ -190,6 +209,7 @@ def get_account(owner: str | None, account_id: str, provider: str | None = None,
         row = query.first()
         if row is None:
             return None
+        require_account(_owner(owner), account_id)
         result = account_view(row)
         if with_credentials:
             result["credentials"] = _parse_json(decrypt(row.credentials), {})
@@ -416,9 +436,12 @@ def source_view(row: ConnectorSourceRecord) -> dict[str, Any]:
 
 
 def get_source_record(owner: str | None, record_id: str) -> dict[str, Any] | None:
+    from services.connector_grants import allowed_ids
+    grants = allowed_ids(_owner(owner))
     db = SessionLocal()
     try:
         row = db.query(ConnectorSourceRecord).filter(
+            ConnectorSourceRecord.account_id.in_(grants) if grants is not None else True,
             ConnectorSourceRecord.id == record_id,
             ConnectorSourceRecord.owner.in_(_owner_scopes(owner)),
         ).first()
@@ -442,6 +465,10 @@ def search_source_records(owner: str | None, query: str, *, providers: list[str]
     db = SessionLocal()
     try:
         scoped_query = db.query(ConnectorSourceRecord).filter(ConnectorSourceRecord.owner.in_(_owner_scopes(owner_key)))
+        from services.connector_grants import allowed_ids
+        grants = allowed_ids(owner_key)
+        if grants is not None:
+            scoped_query = scoped_query.filter(ConnectorSourceRecord.account_id.in_(grants))
         if providers:
             scoped_query = scoped_query.filter(ConnectorSourceRecord.provider.in_(providers))
         if account_id:

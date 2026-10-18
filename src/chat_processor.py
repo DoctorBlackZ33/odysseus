@@ -381,7 +381,9 @@ class ChatProcessor:
             try:
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
                 if rag_manager:
-                    results = rag_manager.search(message, k=5, owner=owner)
+                    from services.connector_grants import bind as bind_connector_grants
+                    with bind_connector_grants(owner, getattr(session, "id", None)):
+                        results = rag_manager.search(message, k=5, owner=owner)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
                     if relevant:

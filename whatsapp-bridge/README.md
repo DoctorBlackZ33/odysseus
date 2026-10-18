@@ -2,7 +2,19 @@
 
 This service uses Baileys 7.0.0-rc14 (Node.js 22.x) and a local SQLite database. Baileys is an unofficial WhatsApp Web client; use is subject to WhatsApp's terms and account/device restrictions. Provider history is best-effort: only data the linked device/provider supplies is stored. This bridge cannot recover data already expired, deleted before synchronization, unavailable on the linked device, view-once, or media that WhatsApp no longer serves.
 
-## User-controlled startup
+## Default: application-managed service
+
+Add WhatsApp in Odysseus → Integrations, leave **Managed by Odysseus** selected, then choose **Add and continue**. Preparation starts automatically and the same window shows the pairing QR. Existing accounts use **Prepare service and pair** to restart. The app image packages Node.js 22 and `npm ci` dependencies. No separate Compose profile, environment bearer, root installation or Docker socket is required. Native installs need Node.js 22 and `npm ci --omit=dev` in this directory; missing prerequisites are reported in the wizard rather than installed by arbitrary runtime commands.
+
+Odysseus starts only the fixed `index.js` entrypoint, binds it to an ephemeral loopback port, and assigns a generated encrypted bearer plus the owner-checked connector account ID. Private state lives under `DATA_DIR/whatsapp-managed/<account-id>` with mode `0700`; Baileys auth is in `auth/`. The explicit **Add and continue** action creates the account and starts setup; raw API account creation alone never connects. The authenticated wizard displays fresh rotating QR images without storing or logging them. Sending remains separately disabled unless explicitly authorized in account settings.
+
+Account inventory, assistant access details, and the reopened send controls show the same effective outbound policy enforced by the server: managed accounts use their saved opt-in; external accounts use the administrator's `WHATSAPP_ENABLE_WRITES` policy. Turning this permission on does not itself send a message.
+
+The app serializes start/stop, holds a process-ownership lock, bounds child restarts, and shuts its children down on exit. Enabled services restore after application restart; **Stop** disables restoration but does not revoke the phone's linked-device authorization. **Retry** after provider logout clears only managed authentication, retaining local/indexed history. Removing the connector removes its managed local state. Unlink the device in WhatsApp itself to revoke authorization. Use one application worker for managed processes; another worker is refused by the ownership lock.
+
+## Advanced: administrator-managed external bridge
+
+Existing external bridges remain supported as an explicit setup mode. The settings below concern that separately operated service, not the managed default.
 
 The HTTP server requires a bearer secret and an independently configured bridge account ID. It refuses to start if either is missing or invalid. Generate a secret out of band and store it in a private environment file/secret manager, never in Git or logs. Example names below are configuration keys, not usable credentials:
 

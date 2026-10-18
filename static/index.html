@@ -791,6 +791,10 @@
         <svg class="sidebar-action-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
         <span class="grow" style="position:relative;left:-1px;">Search</span>
       </div>
+      <button type="button" class="list-item sidebar-integration-link" id="sidebar-integrations-btn" aria-label="Open integrations setup" title="Connect services and manage account access">
+        <svg class="sidebar-action-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        <span class="grow">Integrations</span>
+      </button>
       <!-- Assistant sidebar entry removed — its log + settings live inside
            the Tasks modal (Activity + Settings tabs). The backend
            assistant session is still maintained for log_to_assistant()
@@ -1768,7 +1772,7 @@
         <div data-settings-panel="search" class="hidden">
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Web Search</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Search API used for web search and deep research.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Search for web search and deep research. Recommended: managed SearXNG when available, or DuckDuckGo without a key. API-key providers are optional and never receive automatic fallback unless you select one below.</div>
             <div class="settings-col">
               <div class="settings-row">
                 <label class="settings-label">Provider</label>
@@ -1776,11 +1780,11 @@
                      its value so the existing JS that reads
                      set-searchProvider keeps working unchanged. -->
                 <div class="adm-provider-picker search-provider-picker" id="search-provider-picker" style="flex:1;position:relative;top:5px;">
-                  <button type="button" class="adm-provider-btn" id="search-provider-btn">
-                    <span class="adm-provider-current"><span class="adm-provider-logo"></span><span class="adm-provider-name">SearXNG</span></span>
-                    <svg class="adm-provider-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                  <button type="button" class="adm-provider-btn" id="search-provider-btn" aria-haspopup="listbox" aria-expanded="false" aria-controls="search-provider-menu">
+                    <span class="adm-provider-current"><span class="adm-provider-logo" aria-hidden="true"></span><span class="adm-provider-name">SearXNG</span></span>
+                    <svg class="adm-provider-caret" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
                   </button>
-                  <div class="adm-provider-menu hidden" id="search-provider-menu"></div>
+                  <div class="adm-provider-menu hidden" id="search-provider-menu" role="listbox" aria-label="Search providers"></div>
                 </div>
                 <select id="set-searchProvider" class="settings-select" style="display:none;">
                   <option value="searxng" data-search-logo="searxng">SearXNG (self-hosted)</option>
@@ -1814,14 +1818,12 @@
               </div>
               <div id="set-searchKeyRow" class="settings-row" style="display:none;">
                 <label class="settings-label">API Key</label>
-                <div style="position:relative;flex:1;display:flex;align-items:center;">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="position:absolute;left:9px;top:50%;transform:translateY(-50%);opacity:0.55;pointer-events:none;"><path d="M21 2l-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/><path d="M15.5 7.5l3 3"/></svg>
-                  <input id="set-searchApiKey" type="password" placeholder="API key" class="settings-select" style="flex:1;padding-left:28px;">
-                </div>
+                <input id="set-searchApiKey" type="password" autocomplete="new-password" spellcheck="false" placeholder="API key (hidden after saving)" class="settings-select">
               </div>
+              <div id="set-searchKeyHelp" class="integration-help" style="display:none;">Saved keys are not displayed. Paste a new key only to replace the saved one.</div>
               <div id="set-searchCxRow" class="settings-row" style="display:none;">
-                <label class="settings-label">CX ID</label>
-                <input id="set-searchCx" type="text" placeholder="Google PSE engine ID" class="settings-select">
+                <label class="settings-label">Search Engine ID (CX)</label>
+                <input id="set-searchCx" type="text" autocomplete="off" spellcheck="false" placeholder="Google PSE Search Engine ID (CX)" class="settings-select">
               </div>
               <div class="settings-row" style="align-items:flex-start;">
                 <label class="settings-label" style="margin-top:6px;" title="Providers tried in order when the primary fails or hits a rate limit">Fallbacks</label>
@@ -1831,7 +1833,7 @@
                 </div>
               </div>
               <div id="set-searchHint" class="admin-toggle-sub"></div>
-              <div id="set-searchMsg" style="font-size:11px;"></div>
+              <div id="set-searchMsg" role="status" aria-live="polite" style="font-size:11px;"></div>
             </div>
           </div>
 
@@ -2435,7 +2437,9 @@
         <div data-settings-panel="integrations" class="hidden">
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">All external service connections in one place.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Connect services, choose what Odysseus may read or send, and control indexing and sync. Setup stays in this panel; API secrets are never shown again after saving.</div>
+            <div class="integration-permission-note" role="note">Before you connect, check each provider's access summary. Reads and indexing are opt-in where available; outbound actions stay off until you explicitly allow them. “Sync now” pulls what the provider makes available—it cannot guarantee complete history.</div>
+            <p><button type="button" class="admin-btn-sm" id="integration-agent-access">Assistant tools and account access</button></p>
             <div id="unified-integrations-list"></div>
             <div id="unified-intg-form" style="display:none"></div>
             <div style="text-align:right;padding:8px 0;">

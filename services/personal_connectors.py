@@ -28,16 +28,18 @@ from services.connector_store import (
     list_source_records,
     update_account,
     upsert_source_record,
+    whatsapp_write_policy_enabled,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def whatsapp_write_enabled() -> bool:
-    """Return whether the operator explicitly enabled bridge message sends."""
-    return os.environ.get("WHATSAPP_ENABLE_WRITES", "").strip().lower() in {
-        "1", "true", "yes",
-    }
+def whatsapp_write_enabled(owner: str | None = None, account_id: str | None = None) -> bool:
+    """Managed sends require an independent account opt-in; external uses operator policy."""
+    if owner is not None and account_id:
+        account = get_account(owner, account_id, provider="whatsapp")
+        return whatsapp_write_policy_enabled((account or {}).get("config"))
+    return whatsapp_write_policy_enabled()
 
 
 def _iso_timestamp(value: Any) -> str | None:
@@ -251,6 +253,10 @@ def whatsapp_provider(owner: str, account_id: str):
     account = get_account(owner, account_id, provider="whatsapp")
     if not account:
         raise ValueError("WhatsApp connector account not found for this owner")
+    if (account.get("config") or {}).get("mode") == "managed":
+        from services.whatsapp_runtime import runtime
+        from src.whatsapp_provider import WhatsAppProvider
+        return WhatsAppProvider(*runtime.endpoint(owner, account_id))
     bridge_account_id = str((account.get("config") or {}).get("bridge_account_id") or "")
     expected_id = os.environ.get("WHATSAPP_ACCOUNT_ID", "").strip()
     token = os.environ.get("WHATSAPP_API_TOKEN", "").strip()
@@ -611,6 +617,8 @@ def _sync_email_sync(owner: str, account_id: str, message_budget: int) -> dict:
 
 
 async def sync_email(owner: str, account_id: str, *, message_budget: int = 500) -> dict:
+    from services.connector_grants import require_account
+    require_account(owner, account_id)
     try:
         return await asyncio.to_thread(_sync_email_sync, owner, account_id, max(1, min(int(message_budget), 5000)))
     except Exception as exc:
@@ -661,14 +669,18 @@ async def sync_due_auto_sync() -> dict[str, int]:
                 ConnectorAccount.provider.in_(("gmail", "moodle", "whatsapp"))
             ).all()
             candidates = [(row.id, row.owner, row.provider, _connector_config(row),
-                          row.last_sync_at) for row in rows]
+                          row.last_sync_at, bool(row.credentials)) for row in rows]
         finally:
             db.close()
 
         now = datetime.now(timezone.utc)
         synced = failed = 0
-        for account_id, owner, provider, config, last_sync in candidates:
+        for account_id, owner, provider, config, last_sync, has_credentials in candidates:
             if not config.get("auto_sync"):
+                continue
+            if provider == "moodle" and not has_credentials:
+                continue  # Never open a new login profile from a background pull.
+            if provider == "whatsapp" and config.get("mode") == "managed" and not config.get("service_enabled"):
                 continue
             continuing = (
                 (provider == "gmail" and bool(config.get("email_sync_partial")))
